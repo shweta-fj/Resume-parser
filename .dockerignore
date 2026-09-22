@@ -1,0 +1,6 @@
+.env
+.git/
+__pycache__/
+hash_store_structured/
+input/
+README.md
