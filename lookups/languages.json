@@ -1,0 +1,515 @@
+{
+  "English": [
+    "english",
+    "english language"
+  ],
+  "Hindi": [
+    "hindi",
+    "hindustani",
+    "हिंदी",
+    "हिन्दी"
+  ],
+  "Bengali": [
+    "bengali",
+    "bangla",
+    "bangali",
+    "বাংলা"
+  ],
+  "Telugu": [
+    "telugu",
+    "తెలుగు"
+  ],
+  "Marathi": [
+    "marathi",
+    "मराठी"
+  ],
+  "Tamil": [
+    "tamil",
+    "தமிழ்"
+  ],
+  "Gujarati": [
+    "gujarati",
+    "ગુજરાતી"
+  ],
+  "Urdu": [
+    "urdu",
+    "اردو"
+  ],
+  "Kannada": [
+    "kannada",
+    "ಕನ್ನಡ"
+  ],
+  "Malayalam": [
+    "malayalam",
+    "മലയാളം"
+  ],
+  "Punjabi": [
+    "punjabi",
+    "ਪੰਜਾਬੀ",
+    "ਪੰਜਾਬੀ"
+  ],
+  "Odia": [
+    "odia",
+    "oriya",
+    "ଓଡ଼ିଆ"
+  ],
+  "Assamese": [
+    "assamese",
+    "অসমীয়া"
+  ],
+  "Maithili": [
+    "maithili",
+    "मैथिली"
+  ],
+  "Sanskrit": [
+    "sanskrit",
+    "संस्कृत",
+    "संस्कृतम्"
+  ],
+  "Konkani": [
+    "konkani",
+    "कोंकणी",
+    "कॉंकणी"
+  ],
+  "Nepali": [
+    "nepali",
+    "नेपाली"
+  ],
+  "Sindhi": [
+    "sindhi",
+    "सिन्धी",
+    "سنڌي"
+  ],
+  "Kashmiri": [
+    "kashmiri",
+    "कश्मीरी",
+    "کٲشُر"
+  ],
+  "Dogri": [
+    "dogri",
+    "डोगरी",
+    "डुग्गर"
+  ],
+  "Manipuri": [
+    "manipuri",
+    "meitei",
+    "মৈতৈলোন্",
+    "মণিপুরী"
+  ],
+  "Bodo": [
+    "bodo",
+    "बड़ो"
+  ],
+  "Santali": [
+    "santali",
+    "santhali",
+    "संथाली",
+    "ᱥᱟᱱᱛᱟᱲᱤ"
+  ],
+  "Bhojpuri": [
+    "bhojpuri",
+    "भोजपुरी"
+  ],
+  "Magahi": [
+    "magahi",
+    "मगही"
+  ],
+  "Awadhi": [
+    "awadhi",
+    "अवधी"
+  ],
+  "Braj": [
+    "braj",
+    "brajbhasha",
+    "ब्रज",
+    "ब्रजभाषा"
+  ],
+  "Chhattisgarhi": [
+    "chhattisgarhi",
+    "छत्तीसगढ़ी"
+  ],
+  "Haryanvi": [
+    "haryanvi",
+    "हरियाणवी"
+  ],
+  "Rajasthani": [
+    "rajasthani",
+    "राजस्थानी"
+  ],
+  "Marwari": [
+    "marwari",
+    "मारवाड़ी"
+  ],
+  "Tulu": [
+    "tulu",
+    "ತುಳು"
+  ],
+  "Kodava": [
+    "kodava",
+    "kodagu",
+    "ಕೊಡವ"
+  ],
+  "Khasi": [
+    "khasi",
+    "কা খাসি"
+  ],
+  "Garo": [
+    "garo",
+    "গারো"
+  ],
+  "Mizo": [
+    "mizo",
+    "lushai"
+  ],
+  "Kokborok": [
+    "kokborok",
+    "tripuri",
+    "ককবরক"
+  ],
+  "Gondi": [
+    "gondi",
+    "गोण्डी"
+  ],
+  "Kurukh": [
+    "kurukh",
+    "oraon",
+    "कुड़ुख"
+  ],
+  "Mundari": [
+    "mundari",
+    "मुंडारी"
+  ],
+  "Koya": [
+    "koya"
+  ],
+  "Korku": [
+    "korku",
+    "कोरकू"
+  ],
+  "French": [
+    "french",
+    "français",
+    "francais"
+  ],
+  "German": [
+    "german",
+    "deutsch"
+  ],
+  "Spanish": [
+    "spanish",
+    "español",
+    "espanol"
+  ],
+  "Portuguese": [
+    "portuguese",
+    "português",
+    "portugues"
+  ],
+  "Italian": [
+    "italian",
+    "italiano"
+  ],
+  "Dutch": [
+    "dutch",
+    "nederlands"
+  ],
+  "Russian": [
+    "russian",
+    "русский"
+  ],
+  "Ukrainian": [
+    "ukrainian",
+    "українська"
+  ],
+  "Polish": [
+    "polish",
+    "polski"
+  ],
+  "Czech": [
+    "czech",
+    "čeština",
+    "cesky"
+  ],
+  "Slovak": [
+    "slovak",
+    "slovenčina"
+  ],
+  "Hungarian": [
+    "hungarian",
+    "magyar"
+  ],
+  "Romanian": [
+    "romanian",
+    "română"
+  ],
+  "Bulgarian": [
+    "bulgarian",
+    "български"
+  ],
+  "Serbian": [
+    "serbian",
+    "српски"
+  ],
+  "Croatian": [
+    "croatian",
+    "hrvatski"
+  ],
+  "Slovenian": [
+    "slovenian",
+    "slovenščina"
+  ],
+  "Greek": [
+    "greek",
+    "ελληνικά"
+  ],
+  "Albanian": [
+    "albanian",
+    "shqip"
+  ],
+  "Swedish": [
+    "swedish",
+    "svenska"
+  ],
+  "Norwegian": [
+    "norwegian",
+    "norsk"
+  ],
+  "Danish": [
+    "danish",
+    "dansk"
+  ],
+  "Finnish": [
+    "finnish",
+    "suomi"
+  ],
+  "Icelandic": [
+    "icelandic",
+    "íslenska"
+  ],
+  "Irish": [
+    "irish",
+    "gaeilge"
+  ],
+  "Welsh": [
+    "welsh",
+    "cymraeg"
+  ],
+  "Arabic": [
+    "arabic",
+    "العربية"
+  ],
+  "Hebrew": [
+    "hebrew",
+    "עברית"
+  ],
+  "Persian": [
+    "persian",
+    "farsi",
+    "فارسی"
+  ],
+  "Turkish": [
+    "turkish",
+    "türkçe"
+  ],
+  "Kurdish": [
+    "kurdish",
+    "kurdî"
+  ],
+  "Armenian": [
+    "armenian",
+    "հայերեն"
+  ],
+  "Georgian": [
+    "georgian",
+    "ქართული"
+  ],
+  "Azerbaijani": [
+    "azerbaijani",
+    "azərbaycan"
+  ],
+  "Kazakh": [
+    "kazakh",
+    "қазақша"
+  ],
+  "Uzbek": [
+    "uzbek",
+    "o'zbek"
+  ],
+  "Turkmen": [
+    "turkmen",
+    "türkmen"
+  ],
+  "Kyrgyz": [
+    "kyrgyz",
+    "кыргызча"
+  ],
+  "Tajik": [
+    "tajik",
+    "тоҷикӣ"
+  ],
+  "Mongolian": [
+    "mongolian",
+    "монгол"
+  ],
+  "Mandarin Chinese": [
+    "mandarin",
+    "mandarin chinese",
+    "chinese"
+  ],
+  "Cantonese": [
+    "cantonese"
+  ],
+  "Japanese": [
+    "japanese"
+  ],
+  "Korean": [
+    "korean"
+  ],
+  "Vietnamese": [
+    "vietnamese",
+    "tiếng việt"
+  ],
+  "Thai": [
+    "thai"
+  ],
+  "Indonesian": [
+    "indonesian",
+    "bahasa indonesia"
+  ],
+  "Malay": [
+    "malay",
+    "bahasa melayu"
+  ],
+  "Filipino": [
+    "filipino",
+    "tagalog"
+  ],
+  "Burmese": [
+    "burmese",
+    "မြန်မာ"
+  ],
+  "Khmer": [
+    "khmer",
+    "cambodian",
+    "ខ្មែរ"
+  ],
+  "Tibetan": [
+    "tibetan",
+    "བོད་སྐད"
+  ],
+  "Sinhala": [
+    "sinhala",
+    "sinhalese",
+    "සිංහල"
+  ],
+  "Pashto": [
+    "pashto",
+    "پښتو"
+  ],
+  "Swahili": [
+    "swahili",
+    "kiswahili"
+  ],
+  "Amharic": [
+    "amharic",
+    "አማርኛ"
+  ],
+  "Hausa": [
+    "hausa"
+  ],
+  "Yoruba": [
+    "yoruba",
+    "yorùbá"
+  ],
+  "Igbo": [
+    "igbo"
+  ],
+  "Zulu": [
+    "zulu",
+    "isiZulu"
+  ],
+  "Xhosa": [
+    "xhosa",
+    "isiXhosa"
+  ],
+  "Afrikaans": [
+    "afrikaans"
+  ],
+  "Somali": [
+    "somali",
+    "soomaali"
+  ],
+  "Oromo": [
+    "oromo",
+    "afaan oromoo"
+  ],
+  "Tigrinya": [
+    "tigrinya",
+    "ትግርኛ"
+  ],
+  "Shona": [
+    "shona",
+    "chiShona"
+  ],
+  "Kinyarwanda": [
+    "kinyarwanda"
+  ],
+  "Sesotho": [
+    "sesotho",
+    "sotho"
+  ],
+  "Setswana": [
+    "setswana",
+    "tswana"
+  ],
+  "Chichewa": [
+    "chichewa",
+    "chewa"
+  ],
+  "Lingala": [
+    "lingala"
+  ],
+  "Akan": [
+    "akan"
+  ],
+  "Māori": [
+    "maori",
+    "māori"
+  ],
+  "Samoan": [
+    "samoan"
+  ],
+  "Tongan": [
+    "tongan"
+  ],
+  "Fijian": [
+    "fijian"
+  ],
+  "Hawaiian": [
+    "hawaiian"
+  ],
+  "Greenlandic": [
+    "greenlandic",
+    "kalaallisut"
+  ],
+  "Quechua": [
+    "quechua"
+  ],
+  "Aymara": [
+    "aymara"
+  ],
+  "Guarani": [
+    "guarani"
+  ],
+  "Haitian Creole": [
+    "haitian creole",
+    "kreyol"
+  ],
+  "Latin": [
+    "latin",
+    "latina"
+  ],
+  "Esperanto": [
+    "esperanto"
+  ]
+}

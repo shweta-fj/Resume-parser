@@ -1,0 +1,4 @@
+.env
+__pycache__/
+hash_store_structured/
+input/resumes/
