@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Resume Search (Guided Filters)</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card-bg: #fff; --border: #e4e7ec; --border-soft: #edeff3; --text: #1a1f2b;
+    --muted: #6b7280; --muted-soft: #98a2b3; --accent: #d8285a; --accent-soft: #fdeef2;
+    --mark-bg: #fff1a8; --mark-text: #5c4400;
+    --chip-bg: #f2f4f7; --chip-border: #d7dbe3;
+    --shadow-sm: 0 1px 2px rgba(16,24,40,0.04);
+    --shadow-md: 0 2px 6px rgba(16,24,40,0.04), 0 8px 24px rgba(16,24,40,0.05);
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-font-smoothing: antialiased; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); margin: 0; padding: 0 0 60px;
+    font-size: 14px; line-height: 1.5;
+  }
+  .page { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+
+  .app-header { padding: 28px 0 20px; }
+  .app-header h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  .app-header p { margin: 4px 0 0; color: var(--muted); font-size: 13.5px; }
+
+  .panel { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); padding: 18px 20px; margin-bottom: 18px; }
+
+  .topbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .topbar input[type=text], .topbar input[type=password] {
+    padding: 10px 14px; border: 1px solid var(--border); border-radius: 9px; font-size: 14px;
+    background: #fbfbfc; transition: border-color .15s, background .15s;
+  }
+  .topbar input[type=text]:focus, .topbar input[type=password]:focus { outline: none; border-color: var(--accent); background: #fff; }
+  #url { width: 240px; }
+  #key { width: 200px; }
+
+  button {
+    padding: 10px 18px; border: none; border-radius: 9px; background: var(--accent);
+    color: #fff; font-size: 13.5px; font-weight: 600; cursor: pointer; transition: filter .15s, background .15s;
+  }
+  button:hover { filter: brightness(1.06); }
+  button:active { filter: brightness(0.96); }
+  button.secondary { background: #fff; color: var(--text); border: 1px solid var(--border); font-weight: 600; }
+  button.secondary:hover { background: #fafafb; filter: none; }
+  button.tiny { padding: 3px 9px; font-size: 12px; border-radius: 6px; }
+
+  .meta { color: var(--muted); font-size: 13px; margin: 4px 2px 14px; font-weight: 500; }
+  .meta.error { color: var(--accent); }
+  .badge-new {
+    background: #0f9d63; color: #fff; font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+    padding: 2px 8px; border-radius: 999px; margin-left: 8px; vertical-align: middle; text-transform: uppercase;
+  }
+
+  /* ---- sections row ---- */
+  .scope-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-soft); }
+  .scope-label { color: var(--muted); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; margin-right: 2px; }
+  .scope-row label {
+    display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px;
+    padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: #fbfbfc;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .scope-row label:hover { border-color: var(--muted-soft); }
+  .scope-row label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .scope-row input[type=checkbox] { accent-color: var(--accent); margin: 0; }
+  .scope-row .hint { color: var(--muted-soft); font-size: 12px; font-style: italic; flex-basis: 100%; margin-top: 2px; }
+
+  .config-note { font-size: 12px; color: var(--muted-soft); margin: -6px 2px 18px; line-height: 1.6; }
+  .config-note code { background: var(--chip-bg); padding: 1px 6px; border-radius: 5px; font-size: 11.5px; }
+
+  /* ---- filter builder ---- */
+  .filter-panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .filter-panel-head h3 { margin: 0; font-size: 13px; color: var(--text); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+  .filter-row {
+    display: flex; gap: 8px; align-items: flex-start; padding: 12px 0; border-top: 1px solid var(--border-soft);
+    flex-wrap: wrap;
+  }
+  .filter-row:first-of-type { border-top: none; padding-top: 2px; }
+  .filter-row select {
+    padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; background: #fbfbfc; color: var(--text);
+  }
+  .filter-row select:focus { outline: none; border-color: var(--accent); }
+  .filter-row .attr-select { min-width: 130px; font-weight: 600; }
+  .filter-row .op-select { min-width: 160px; }
+  .value-box {
+    flex: 1; min-width: 220px; position: relative; border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 7px; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; background: #fbfbfc;
+  }
+  .value-box:focus-within { border-color: var(--accent); background: #fff; }
+  .value-box input { border: none; outline: none; flex: 1; min-width: 100px; font-size: 13px; padding: 5px; background: transparent; }
+  .tag {
+    background: var(--chip-bg); border: 1px solid var(--chip-border); border-radius: 6px; padding: 3px 8px;
+    font-size: 12.5px; font-weight: 500; display: flex; align-items: center; gap: 6px;
+  }
+  .tag .x { cursor: pointer; color: var(--muted-soft); font-weight: bold; line-height: 1; }
+  .tag .x:hover { color: var(--accent); }
+  .join-chip {
+    font-size: 10px; font-weight: 700; color: var(--accent); background: var(--accent-soft);
+    border-radius: 5px; padding: 2px 6px; cursor: pointer; user-select: none; letter-spacing: 0.03em;
+  }
+  .suggestions {
+    position: absolute; top: 100%; left: 0; right: 0; background: #fff; border: 1px solid var(--border);
+    border-radius: 10px; margin-top: 6px; max-height: 190px; overflow-y: auto; z-index: 10; box-shadow: var(--shadow-md);
+  }
+  .suggestions div { padding: 8px 12px; font-size: 13px; cursor: pointer; }
+  .suggestions div:hover { background: var(--accent-soft); }
+  .no-value-note { font-size: 12.5px; color: var(--muted-soft); font-style: italic; padding: 9px 2px; }
+  .row-remove { color: var(--muted-soft); cursor: pointer; font-size: 20px; line-height: 1; padding: 5px 6px; border-radius: 6px; }
+  .row-remove:hover { color: var(--accent); background: var(--accent-soft); }
+  .filter-panel-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; flex-wrap: wrap; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border-soft); }
+  .global-join { font-size: 13px; display: flex; align-items: center; gap: 8px; color: var(--muted); font-weight: 500; }
+  .global-join select { padding: 7px 10px; border-radius: 7px; border: 1px solid var(--border); font-size: 13px; }
+  .preview {
+    font-family: "SF Mono", Consolas, Monaco, monospace; font-size: 12.5px; background: #161a22; color: #9ee6b5;
+    padding: 12px 14px; border-radius: 9px; margin-top: 12px; white-space: pre-wrap; word-break: break-word;
+    line-height: 1.6;
+  }
+  .preview.empty { color: #6b7280; font-style: italic; }
+  .hint { font-size: 11.5px; color: var(--muted-soft); margin-top: 4px; }
+  .warn { color: #b45309; }
+
+  /* ---- results ---- */
+  .card {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow-sm); padding: 18px 22px; margin-bottom: 12px; transition: box-shadow .15s;
+  }
+  .card:hover { box-shadow: var(--shadow-md); }
+  .field-row { display: flex; gap: 10px; padding: 3px 0; font-size: 14px; }
+  .field-row:first-child { font-weight: 700; font-size: 15px; }
+  .field-label { color: var(--muted-soft); width: 90px; flex-shrink: 0; font-weight: 500; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.03em; padding-top: 2px; }
+  .field-value { flex: 1; word-break: break-word; }
+  mark { background: var(--mark-bg); color: var(--mark-text); padding: 1px 3px; border-radius: 4px; font-weight: 600; }
+  details.field-details { margin-top: 9px; border-top: 1px solid var(--border-soft); padding-top: 9px; }
+  details.field-details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; user-select: none; }
+  details.field-details > summary:hover { color: var(--text); }
+  details.field-details[open] > summary { color: var(--text); }
+  .list-text { white-space: pre-wrap; font-size: 13.5px; margin-top: 6px; color: #333a48; line-height: 1.7; }
+  .has-match summary::after { content: " \25CF match"; color: var(--accent); font-weight: 600; font-size: 11px; text-transform: none; letter-spacing: 0; }
+  .empty { color: var(--muted); font-style: italic; padding: 48px; text-align: center; background: var(--card-bg); border: 1px dashed var(--border); border-radius: var(--radius); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="app-header">
+  <h1>Resume Search</h1>
+  <p>Guided filters, per-section scoping, and live highlighting over your MeiliSearch resume index.</p>
+</div>
+
+<div class="panel">
+  <div class="topbar">
+    <input id="url" type="text" placeholder="MeiliSearch URL" value="http://localhost:7700">
+    <input id="key" type="password" placeholder="API key (master key)">
+    <button onclick="runSearch()">Search</button>
+  </div>
+  <div class="scope-row">
+    <span class="scope-label">Sections</span>
+    <label><input type="checkbox" class="scope-box" value="educations"> Educations</label>
+    <label><input type="checkbox" class="scope-box" value="certifications"> Certifications</label>
+    <label><input type="checkbox" class="scope-box" value="projects"> Projects</label>
+    <label><input type="checkbox" class="scope-box" value="internships"> Internships</label>
+    <label><input type="checkbox" class="scope-box" value="unmatched"> Unmatched</label>
+  </div>
+</div>
+
+<div class="panel filter-panel">
+  <div class="filter-panel-head">
+    <h3>Guided Filters <span class="badge-new">new</span></h3>
+    <button class="secondary" onclick="addFilterRow()">+ Add filter</button>
+  </div>
+  <div id="filterBuilder"></div>
+  <div class="filter-panel-foot">
+    <div class="global-join">
+      Combine filters:
+      <select id="globalJoin" onchange="onGlobalJoinChange()">
+        <option value="AND">Match ALL filters (AND)</option>
+        <option value="OR">Match ANY filter (OR)</option>
+      </select>
+    </div>
+    <div class="hint" id="attrSourceHint">Fields: skills_list, titles_list, industries_list, languages_list</div>
+  </div>
+  <div id="filterPreview" class="preview empty">No filters added — search will return unfiltered results.</div>
+</div>
+
+<div id="meta" class="meta"></div>
+<div id="results"></div>
+
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const INDEX = 'resumes_structured';
+// Must be two DIFFERENT strings, not the same one twice: the conversion
+// below does two independent passes (replace every OPEN, then replace
+// every CLOSE) rather than alternating occurrence-by-occurrence, so an
+// identical open/close pair leaves the second pass with nothing to find
+// and every <mark> stays unclosed for the rest of the field.
+const OPEN = '\u0001', CLOSE = '\u0002';
+
+function safeGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function safeSet(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
+
+// ---------- config ----------
+$('url').value = safeGet('meili_url_v2') || $('url').value;
+$('key').value = safeGet('meili_key_v2') || '';
+
+// fields that are actually configured as filterable on the server; refreshed on first search
+let filterableAttrs = ['skills_list', 'titles_list', 'industries_list', 'languages_list'];
+const FIELD_FOR_ATTR = { skills_list: 'skills', titles_list: 'titles', industries_list: 'industries', languages_list: 'languages' };
+
+const OPERATORS = [
+  { value: '=',            label: '=  (equals)',                needsValue: true,  listMode: false },
+  { value: '!=',           label: '!=  (not equals)',            needsValue: true,  listMode: false },
+  { value: 'IN',           label: 'IN  (any of)',                needsValue: true,  listMode: true  },
+  { value: 'NOT IN',       label: 'NOT IN  (none of)',           needsValue: true,  listMode: true  },
+  { value: 'CONTAINS',     label: 'CONTAINS  (experimental)',    needsValue: true,  listMode: false, experimental: true },
+  { value: 'NOT CONTAINS', label: 'NOT CONTAINS  (experimental)',needsValue: true,  listMode: false, experimental: true },
+  { value: 'EXISTS',       label: 'EXISTS',                      needsValue: false },
+  { value: 'NOT EXISTS',   label: 'NOT EXISTS',                  needsValue: false },
+  { value: 'IS EMPTY',     label: 'IS EMPTY',                    needsValue: false },
+  { value: 'IS NOT EMPTY', label: 'IS NOT EMPTY',                needsValue: false },
+  { value: 'IS NULL',      label: 'IS NULL',                     needsValue: false },
+  { value: 'IS NOT NULL',  label: 'IS NOT NULL',                 needsValue: false },
+];
+const POSITIVE_OPS_FOR_HIGHLIGHT = new Set(['=', 'IN', 'CONTAINS']);
+
+let filterRows = [];
+let rowIdSeq = 0;
+let globalJoin = safeGet('meili_global_join_v2') || 'AND';
+$('globalJoin').value = globalJoin;
+
+function newRow() {
+  return { id: ++rowIdSeq, attr: filterableAttrs[0], operator: '=', values: [], valuesJoin: 'OR' };
+}
+
+function addFilterRow() {
+  filterRows.push(newRow());
+  renderFilterBuilder();
+}
+
+function removeFilterRow(id) {
+  filterRows = filterRows.filter(r => r.id !== id);
+  renderFilterBuilder();
+}
+
+function getRow(id) { return filterRows.find(r => r.id === id); }
+
+function onAttrChange(id, value) { getRow(id).attr = value; renderFilterBuilder(); }
+function onOperatorChange(id, value) {
+  const row = getRow(id);
+  row.operator = value;
+  const opDef = OPERATORS.find(o => o.value === value);
+  if (!opDef.needsValue) row.values = [];
+  renderFilterBuilder();
+}
+function toggleValuesJoin(id) {
+  const row = getRow(id);
+  row.valuesJoin = row.valuesJoin === 'OR' ? 'AND' : 'OR';
+  renderFilterBuilder();
+}
+function addTagValue(id, raw) {
+  const value = String(raw || '').trim();
+  if (!value) return;
+  const row = getRow(id);
+  if (!row.values.includes(value)) row.values.push(value);
+  renderFilterBuilder();
+}
+function removeTagValue(id, value) {
+  const row = getRow(id);
+  row.values = row.values.filter(v => v !== value);
+  renderFilterBuilder();
+}
+function onGlobalJoinChange() {
+  globalJoin = $('globalJoin').value;
+  safeSet('meili_global_join_v2', globalJoin);
+  renderFilterPreview();
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+function escapeFilterValue(v) {
+  return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function renderFilterBuilder() {
+  const html = filterRows.map(row => {
+    const opDef = OPERATORS.find(o => o.value === row.operator);
+    const attrOptions = filterableAttrs.map(a =>
+      `<option value="${escapeHtml(a)}" ${a === row.attr ? 'selected' : ''}>${escapeHtml(a)}</option>`).join('');
+    const opOptions = OPERATORS.map(o =>
+      `<option value="${escapeHtml(o.value)}" ${o.value === row.operator ? 'selected' : ''}>${escapeHtml(o.label)}</option>`).join('');
+
+    let valueArea;
+    if (!opDef.needsValue) {
+      valueArea = `<div class="no-value-note">No value needed for this operator.</div>`;
+    } else {
+      const tags = row.values.map((v, i) => {
+        const joinChip = i > 0
+          ? `<span class="join-chip" onclick="toggleValuesJoin(${row.id})" title="Click to flip AND/OR">${row.valuesJoin}</span>`
+          : '';
+        return `${joinChip}<span class="tag">${escapeHtml(v)}<span class="x" onclick="removeTagValue(${row.id}, ${JSON.stringify(v).replace(/"/g, '&quot;')})">&times;</span></span>`;
+      }).join('');
+      valueArea = `
+        <div class="value-box">
+          ${tags}
+          <input type="text" id="valInput-${row.id}" placeholder="${row.values.length ? 'Add more...' : 'Type a value...'}"
+            oninput="onValueInput(${row.id})"
+            onkeydown="onValueKeydown(event, ${row.id})">
+          <div id="sugg-${row.id}"></div>
+        </div>`;
+    }
+
+    const experimentalNote = opDef.experimental
+      ? `<div class="hint warn">Requires the experimental CONTAINS filter to be enabled on the MeiliSearch server, and can be slower on large indexes.</div>`
+      : '';
+
+    return `
+      <div class="filter-row">
+        <select class="attr-select" onchange="onAttrChange(${row.id}, this.value)">${attrOptions}</select>
+        <select class="op-select" onchange="onOperatorChange(${row.id}, this.value)">${opOptions}</select>
+        ${valueArea}
+        <div class="row-remove" onclick="removeFilterRow(${row.id})" title="Remove filter">&times;</div>
+        ${experimentalNote}
+      </div>`;
+  }).join('');
+
+  $('filterBuilder').innerHTML = html || `<div class="hint">No filters yet — click "+ Add filter" to build one.</div>`;
+  renderFilterPreview();
+  rerenderResults(); // keep already-fetched results' visible sections in sync with filter changes
+}
+
+let suggestDebounce = null;
+function onValueInput(rowId) {
+  clearTimeout(suggestDebounce);
+  suggestDebounce = setTimeout(() => fetchSuggestions(rowId), 220);
+}
+function onValueKeydown(e, rowId) {
+  const input = e.target;
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    addTagValue(rowId, input.value);
+  } else if (e.key === 'Backspace' && !input.value) {
+    const row = getRow(rowId);
+    if (row.values.length) removeTagValue(rowId, row.values[row.values.length - 1]);
+  }
+}
+
+async function fetchSuggestions(rowId) {
+  const row = getRow(rowId);
+  const input = $(`valInput-${rowId}`);
+  const suggBox = $(`sugg-${rowId}`);
+  if (!input || !suggBox) return;
+  const query = input.value.trim();
+  const url = $('url').value.trim().replace(/\/$/, '');
+  const key = $('key').value.trim();
+  try {
+    const resp = await fetch(`${url}/indexes/${INDEX}/facet-search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+      body: JSON.stringify({ facetName: row.attr, facetQuery: query }),
+    });
+    if (!resp.ok) { suggBox.innerHTML = ''; return; }
+    const data = await resp.json();
+    const hits = (data.facetHits || []).slice(0, 8);
+    if (hits.length === 0) { suggBox.innerHTML = ''; return; }
+    suggBox.innerHTML = `<div class="suggestions">${hits.map(h =>
+      `<div class="sugg-item">${escapeHtml(h.value)} <span style="color:var(--muted)">(${h.count})</span></div>`
+    ).join('')}</div>`;
+    // Values can contain quotes/backslashes, so wire clicks up as real
+    // listeners with the raw string in closure -- building an inline
+    // onmousedown="..." attribute from JSON.stringify(h.value) breaks
+    // whenever the value itself contains a double quote.
+    const items = suggBox.querySelectorAll('.sugg-item');
+    hits.forEach((h, i) => {
+      items[i].addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        addTagValue(rowId, h.value);
+        suggBox.innerHTML = '';
+      });
+    });
+  } catch {
+    suggBox.innerHTML = '';
+  }
+}
+
+function buildRowExpr(row) {
+  const opDef = OPERATORS.find(o => o.value === row.operator);
+  if (opDef.needsValue && row.values.length === 0) return null;
+  switch (row.operator) {
+    case '=':
+    case '!=':
+    case 'CONTAINS':
+    case 'NOT CONTAINS': {
+      const parts = row.values.map(v => `${row.attr} ${row.operator} "${escapeFilterValue(v)}"`);
+      return parts.length > 1 ? `(${parts.join(` ${row.valuesJoin} `)})` : parts[0];
+    }
+    case 'IN':
+    case 'NOT IN': {
+      const list = row.values.map(v => `"${escapeFilterValue(v)}"`).join(', ');
+      return `${row.operator === 'NOT IN' ? 'NOT ' : ''}${row.attr} IN [${list}]`;
+    }
+    default:
+      return `${row.attr} ${row.operator}`;
+  }
+}
+
+function buildFilterString() {
+  const exprs = filterRows.map(buildRowExpr).filter(Boolean);
+  if (exprs.length === 0) return '';
+  if (exprs.length === 1) return exprs[0];
+  return exprs.map(e => `(${e})`).join(` ${globalJoin} `);
+}
+
+function renderFilterPreview() {
+  const effective = buildFilterString();
+  const box = $('filterPreview');
+  if (!effective) {
+    box.className = 'preview empty';
+    box.textContent = 'No filters added — search will return unfiltered results.';
+  } else {
+    box.className = 'preview';
+    box.textContent = effective;
+  }
+}
+
+// ---------- highlighting ----------
+function markAdditional(rawText, terms) {
+  if (!rawText || !terms || terms.length === 0) return rawText;
+  let result = rawText;
+  for (const term of terms) {
+    if (!term) continue;
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`(?<!${OPEN})\\b(${escaped})\\b(?!${CLOSE})`, 'gi');
+    result = result.replace(re, `${OPEN}$1${CLOSE}`);
+  }
+  return result;
+}
+function renderHighlighted(value) {
+  if (value === null || value === undefined) return '';
+  const escaped = escapeHtml(String(value));
+  return escaped.split(OPEN).join('<mark>').split(CLOSE).join('</mark>');
+}
+function containsMatch(value) {
+  return typeof value === 'string' && value.includes(OPEN);
+}
+function getHighlightTermsForField(fieldKey) {
+  const attr = Object.keys(FIELD_FOR_ATTR).find(a => FIELD_FOR_ATTR[a] === fieldKey);
+  if (!attr) return [];
+  const terms = [];
+  for (const row of filterRows) {
+    if (row.attr !== attr || !POSITIVE_OPS_FOR_HIGHLIGHT.has(row.operator)) continue;
+    terms.push(...row.values);
+  }
+  return terms;
+}
+
+function renderTextField(label, plainValue, formattedValue, highlightTerms) {
+  if (!plainValue) return '';
+  let base = formattedValue || plainValue;
+  if (highlightTerms && highlightTerms.length) base = markAdditional(base, highlightTerms);
+  const match = containsMatch(base);
+  return `
+    <details class="field-details" ${match ? 'open' : ''} class="${match ? 'has-match' : ''}">
+      <summary>${escapeHtml(label)}</summary>
+      <div class="list-text">${renderHighlighted(base)}</div>
+    </details>`;
+}
+function renderArrayField(label, plainArr, formattedArr) {
+  plainArr = plainArr || [];
+  if (plainArr.length === 0) return '';
+  formattedArr = formattedArr || plainArr;
+  const anyMatch = formattedArr.some(containsMatch);
+  const items = formattedArr.map(v => `<div>&bull; ${renderHighlighted(v)}</div>`).join('');
+  return `
+    <details class="field-details" ${anyMatch ? 'open' : ''} class="${anyMatch ? 'has-match' : ''}">
+      <summary>${escapeHtml(label)} (${plainArr.length})</summary>
+      <div class="list-text">${items}</div>
+    </details>`;
+}
+
+// Sections checked here serve two purposes: they scope the text search
+// (attributesToSearchOn) AND they hide every other section in the
+// rendered cards below. A section that's the target of an active filter
+// row is always shown regardless, so a skills_list filter never hides
+// its own highlighted Skills section just because the box isn't ticked.
+function getCheckedSections() {
+  return new Set([...document.querySelectorAll('.scope-box:checked')].map(cb => cb.value));
+}
+function getFilteredSections() {
+  return new Set(filterRows.map(r => FIELD_FOR_ATTR[r.attr]).filter(Boolean));
+}
+
+function renderHit(hit, visibleSet) {
+  const f = hit._formatted || hit;
+  if (hit.message) {
+    return `<div class="card">
+      <div class="field-row"><div class="field-label">id</div><div class="field-value">${escapeHtml(hit.id || '')}</div></div>
+      <div class="field-row"><div class="field-label">note</div><div class="field-value">${renderHighlighted(f.message)}</div></div>
+    </div>`;
+  }
+  // visibleSet === null means "nothing is checked and no filter is active" -> show every
+  // section (plain browsing). Otherwise only sections that are either actively filtered
+  // on or ticked in the Sections row are shown -- e.g. filtering by skills_list alone
+  // narrows the card down to just the Skills section.
+  const show = (key) => !visibleSet || visibleSet.has(key);
+  return `<div class="card">
+    <div class="field-row"><div class="field-label">name</div><div class="field-value">${renderHighlighted(f.name)}</div></div>
+    <div class="field-row"><div class="field-label">email</div><div class="field-value">${renderHighlighted(f.email)}</div></div>
+    <div class="field-row"><div class="field-label">phone</div><div class="field-value">${renderHighlighted(f.phone)}</div></div>
+    ${show('skills') ? renderTextField('Skills', hit.skills, f.skills, getHighlightTermsForField('skills')) : ''}
+    ${show('titles') ? renderTextField('Titles', hit.titles, f.titles, getHighlightTermsForField('titles')) : ''}
+    ${show('industries') ? renderTextField('Industries', hit.industries, f.industries, getHighlightTermsForField('industries')) : ''}
+    ${show('languages') ? renderTextField('Languages', hit.languages, f.languages, getHighlightTermsForField('languages')) : ''}
+    ${show('educations') ? renderTextField('Educations', hit.educations, f.educations) : ''}
+    ${show('certifications') ? renderTextField('Certifications', hit.certifications, f.certifications) : ''}
+    ${show('projects') ? renderArrayField('Projects', hit.projects, f.projects) : ''}
+    ${show('internships') ? renderArrayField('Internships', hit.internships, f.internships) : ''}
+    ${show('unmatched') ? renderTextField('Unmatched', hit.unmatched, f.unmatched) : ''}
+  </div>`;
+}
+
+let lastHits = [];
+function rerenderResults() {
+  if (!lastHits.length) return;
+  const combined = new Set([...getCheckedSections(), ...getFilteredSections()]);
+  const visibleSet = combined.size ? combined : null;
+  $('results').innerHTML = lastHits.map(h => renderHit(h, visibleSet)).join('');
+}
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.scope-box').forEach(cb => cb.addEventListener('change', rerenderResults));
+});
+
+// ---------- search ----------
+async function refreshFilterableAttrs() {
+  const url = $('url').value.trim().replace(/\/$/, '');
+  const key = $('key').value.trim();
+  try {
+    const resp = await fetch(`${url}/indexes/${INDEX}/settings/filterable-attributes`, {
+      headers: { ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+    });
+    if (!resp.ok) return;
+    const attrs = await resp.json();
+    if (Array.isArray(attrs) && attrs.length) {
+      filterableAttrs = attrs;
+      $('attrSourceHint').textContent = `Fields (live from server): ${attrs.join(', ')}`;
+      for (const row of filterRows) {
+        if (!filterableAttrs.includes(row.attr)) row.attr = filterableAttrs[0];
+      }
+      renderFilterBuilder();
+    }
+  } catch { /* keep default list */ }
+}
+
+async function runSearch() {
+  const url = $('url').value.trim().replace(/\/$/, '');
+  const key = $('key').value.trim();
+  const q = ''; // plain text search box was removed -- this page is filter/section-driven only
+  safeSet('meili_url_v2', url);
+  safeSet('meili_key_v2', key);
+
+  await refreshFilterableAttrs();
+
+  const filter = buildFilterString();
+
+  $('meta').className = 'meta';
+  $('meta').textContent = 'Searching...';
+  $('results').innerHTML = '';
+
+  const body = {
+    q, limit: 30,
+    attributesToHighlight: ['*'],
+    highlightPreTag: OPEN,
+    highlightPostTag: CLOSE,
+  };
+  if (filter) body.filter = filter;
+
+  const scopeFields = [...document.querySelectorAll('.scope-box:checked')].map(cb => cb.value);
+  if (scopeFields.length) body.attributesToSearchOn = scopeFields;
+
+  try {
+    const resp = await fetch(`${url}/indexes/${INDEX}/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.text();
+      $('meta').className = 'meta error';
+      $('meta').textContent = `Error ${resp.status}`;
+      $('results').innerHTML = `<div class="empty">${escapeHtml(errBody)}</div>`;
+      return;
+    }
+    const data = await resp.json();
+    $('meta').textContent = `${data.estimatedTotalHits ?? data.hits.length} hits - ${data.processingTimeMs}ms`;
+    lastHits = data.hits;
+    if (data.hits.length === 0) {
+      $('results').innerHTML = '<div class="empty">No matches.</div>';
+      return;
+    }
+    rerenderResults();
+  } catch (e) {
+    $('meta').className = 'meta error';
+    $('meta').textContent = 'Connection failed';
+    $('results').innerHTML = `<div class="empty">${escapeHtml(String(e))}<br>Check the URL/key above, and that MeiliSearch is running.</div>`;
+  }
+}
+
+renderFilterBuilder();
+</script>
+</body>
+</html>
