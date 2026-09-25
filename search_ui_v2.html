@@ -153,6 +153,10 @@
   <div class="topbar">
     <input id="url" type="text" placeholder="MeiliSearch URL" value="https://compacter-jubilance-unfasten.ngrok-free.dev">
     <input id="key" type="password" placeholder="API key (master key)">
+    <select id="indexSelect">
+      <option value="resumes">resumes</option>
+      <option value="resumes_structured">resumes_structured</option>
+    </select>
     <input id="identityQ" type="text" placeholder="Search" style="flex:1; min-width:200px;">
     <label style="display:flex; align-items:center; gap:5px; font-size:12.5px; color:var(--muted); white-space:nowrap;">
       <input type="checkbox" id="exactMatch"> Exact (no typo match)
@@ -192,7 +196,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const INDEX = 'resumes_structured';
+let INDEX = safeGet('meili_index_v2') || 'resumes';
 // Must be two DIFFERENT strings, not the same one twice: the conversion
 // below does two independent passes (replace every OPEN, then replace
 // every CLOSE) rather than alternating occurrence-by-occurrence, so an
@@ -206,6 +210,17 @@ function safeSet(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore *
 // ---------- config ----------
 $('url').value = safeGet('meili_url_v2') || $('url').value;
 $('key').value = safeGet('meili_key_v2') || '';
+$('indexSelect').value = INDEX;
+$('indexSelect').addEventListener('change', () => {
+  INDEX = $('indexSelect').value;
+  safeSet('meili_index_v2', INDEX);
+  filterRows = [];          // old filter rows may not apply to the new index's fields
+  lastHits = [];
+  $('results').innerHTML = '';
+  $('pagination').innerHTML = '';
+  $('meta').textContent = '';
+  refreshFilterableAttrs();
+});
 $('identityQ').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); }); // for search box(if write any query then run serach)
 
 // The exact, explicit list of fields offered for filtering -- anything else
@@ -645,6 +660,40 @@ function getFilteredSections() {
   return new Set(filterRows.map(r => FIELD_FOR_ATTR[r.attr]).filter(Boolean));
 }
 
+// Fallback for the plain 'resumes' index, which has no discrete educations/
+// certifications/projects/internships fields -- everything sits in a raw
+// sections object (heading -> text) instead. Only pull out the headings that
+// map to the same categories resumes_structured exposes (education,
+// certification, project, internship); other raw headings (Personal
+// Details, Declaration, plain Work Experience, ...) are left out.
+const SECTION_HEADING_GROUPS = {
+  Educations: new Set(['education', 'academic qualifications', 'educational qualifications',
+    'education qualification', 'academic qualification', 'sslc']),
+  Certifications: new Set(['certifications', 'certificates', 'certification']),
+  Projects: new Set(['projects', 'academic projects', 'project']),
+  Internships: new Set(['internship', 'internship experience']),
+};
+function renderSectionsFallback(hit) {
+  const sections = hit.sections;
+  const formattedSections = (hit._formatted && hit._formatted.sections) || {};
+  if (!sections || typeof sections !== 'object') return '';
+  const grouped = { Educations: [], Certifications: [], Projects: [], Internships: [] };
+  const groupedFormatted = { Educations: [], Certifications: [], Projects: [], Internships: [] };
+  for (const [heading, text] of Object.entries(sections)) {
+    const ch = (heading || '').trim().toLowerCase();
+    for (const [label, words] of Object.entries(SECTION_HEADING_GROUPS)) {
+      if (words.has(ch)) {
+        grouped[label].push(text);
+        groupedFormatted[label].push(formattedSections[heading] ?? text);
+        break;
+      }
+    }
+  }
+  return Object.entries(grouped)
+    .map(([label, texts]) => renderTextField(label, texts.join('\n'), groupedFormatted[label].join('\n'), null, false))
+    .join('');
+}
+
 function renderHit(hit, visibleSet, forcedSet) {
   const f = hit._formatted || hit;
   if (hit.skipped || hit.message) return ''; // never show unparseable-file placeholder entries here
@@ -672,6 +721,7 @@ function renderHit(hit, visibleSet, forcedSet) {
     ${show('certifications') ? renderTextField('Certifications', hit.certifications, f.certifications, null, forced('certifications')) : ''}
     ${show('projects') ? renderArrayField('Projects', hit.projects, f.projects, forced('projects')) : ''}
     ${show('internships') ? renderArrayField('Internships', hit.internships, f.internships, forced('internships')) : ''}
+    ${hit.sections ? renderSectionsFallback(hit) : ''}
     ${/* Unmatched is hidden server-side (removed from displayedAttributes) -- disabled here too:
        show('unmatched') ? renderTextField('Unmatched', hit.unmatched, f.unmatched, null, forced('unmatched')) : '' */ ''}
   </div>`;

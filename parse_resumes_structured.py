@@ -67,7 +67,7 @@ _load_dotenv()
 DEFAULT_INPUT_DIR = os.path.join("input", "resumes")
 DEFAULT_LOOKUPS_DIR = "lookups"
 DEFAULT_HASH_DIR = "hash_store_structured"
-DEFAULT_MEILI_URL = os.environ.get("MEILI_URL", "http://localhost:7700")
+DEFAULT_MEILI_URL = os.environ.get("MEILI_URL", "https://compacter-jubilance-unfasten.ngrok-free.dev")
 DEFAULT_MEILI_INDEX = "resumes_structured"
 DEFAULT_MEILI_API_KEY = os.environ.get("MEILI_API_KEY")
 NORMALIZED_CATEGORY_MAPPING_FILE = "normalized_category_mapping.json"
