@@ -53,14 +53,18 @@ put programs on `PATH` more consistently.
 resumes/                            (project root)
 ├── parse_resumes_structured.py     the one script
 ├── requirements.txt
+├── Dockerfile                      runs the parser in a container (see its comments)
+├── .env                            MeiliSearch address and key (see "How to run it")
 ├── input/
-│   └── resumes/                    resumes to read go here
-├── lookups/                        the 5 reference lists
+│   └── resumes/                    resumes to read go here (not committed)
+├── lookups/                        the reference lists
 │   ├── skills.json
 │   ├── titles.json
 │   ├── industries.json
 │   ├── languages.json
-│   └── normalized_category_mapping.json
+│   ├── normalized_category_mapping.json
+│   ├── skills_extra.json           extra skills, short forms, and blocked words
+│   └── industry_keywords.json      sector name -> clue words and employers
 └── hash_store_structured/          the tool's own bookkeeping file, seen_hashes.json
 ```
 
@@ -113,27 +117,57 @@ slightly edited, only an exact copy.
   "titles": "Software Engineer, Design Engineer",
   "industries": "Manufacturing",
   "languages": "English, Hindi, Kannada",
-  "educations": "Bachelor of Technology in Mechanical Engineering, XYZ College of Engineering",
+  "skills_list": ["Python", "AutoCAD", "SolidWorks"],
+  "titles_list": ["Software Engineer", "Design Engineer"],
+  "industries_list": ["Manufacturing"],
+  "languages_list": ["English", "Hindi", "Kannada"],
+  "educations": "B.Tech Mechanical Engineering, XYZ College of Engineering, Pune; PUC, ABC PU College",
+  "educations_list": ["B.Tech Mechanical Engineering, XYZ College of Engineering, Pune", "PUC, ABC PU College"],
   "certifications": "AWS Certified Cloud Practitioner",
+  "certifications_list": ["AWS Certified Cloud Practitioner"],
   "projects": ["Design and Fabrication of Electric Micro Car", "..."],
   "internships": ["Summer Intern, ABC Pvt Ltd", "..."],
   "unmatched": "some other skill, another title, ..."
 }
 ```
 
-Every field except `projects`/`internships` (which stay as arrays, since
-each entry is its own distinct item) is a **plain, comma-separated
-string** rather than a JSON array — easier to read at a glance in
-MeiliSearch's own document browser. `id` is a hash MeiliSearch requires as
-the primary key; there's no `source_file` field, by design.
+Each list-like field comes twice: a **plain string** that's easy to read in
+MeiliSearch's document browser, and a real **array** (`*_list`) with one
+item per element, which is what filters should use. `skills_list = "Java"`
+matches that one skill exactly, where a filter on the comma-separated
+string could only match the whole list. Education and certification entries
+contain commas themselves ("B.Tech, XYZ College, Pune"), so their strings
+separate entries with `"; "`. `projects`/`internships` are arrays only. `id`
+is a hash MeiliSearch requires as the primary key; there's no `source_file`
+field, by design.
 
-`skills`/`titles`/`industries`/`languages` only include **exact** matches
-against your `lookups/*.json` reference lists (tolerant of a term's own
-internal punctuation, e.g. `Node.js` still matches `Node JS`, but *not*
-tolerant of spacing a resume inserts that the canonical term doesn't have,
-e.g. `Auto Cad` will not match canonical `AutoCAD` — it goes to `unmatched`
-instead). This is a deliberate precision-over-recall choice: it means a
-few real matches are missed, but nothing gets matched that shouldn't be.
+Where each field comes from:
+- **Sections.** Every heading is sorted into a category (education,
+  projects, experience, skills, ...). A known wording ("Educational
+  Profile", "Academic Credentials", "Work Experience (Total 15 Years)")
+  counts even in plain body text. A looser keyword match also needs a style
+  cue (bold, bigger, ALL CAPS, trailing colon), so a skills-list line like
+  "Project Management" is never mistaken for a heading.
+- **Skills.** Everything in a skills section counts: known terms, plus list
+  items that merely look like skills ("Tally ERP 9", "Desktop Support").
+  So do "Tech Stack:"/"Environment:" lines in jobs and projects. In job and
+  project prose, only known skills written the way the list writes them
+  count ("Java", not "software"). `lookups/skills_extra.json` adds common
+  skills `skills.json` lacks: it stores many under long names such as
+  "Python (Programming Language)", and their short forms are matched too.
+  It also blocks generic words ("Birth", "Status", "Email") and lists
+  ambiguous ones ("Excel", "Go", "C") that only count as whole list items.
+- **Titles.** Read from the headline under the name, the summary, and
+  job/internship entries: "Designation:" labels, "worked as a ..." phrases
+  and short title lines. A title must end in an occupation word
+  ("Engineer", "Manager", "Head", "Trainee", ...). That drops the generic
+  words `titles.json` also holds ("Management", "Academic", "High School")
+  and keeps real titles it doesn't know ("Procurement Head").
+- **Industries.** Clues in `lookups/industry_keywords.json`: a sector word
+  ("thermal power plant", "banking domain") or a well-known employer
+  ("Infosys", "Tata Motors"), mapped to short sector names. Explicit
+  "Industry:"/"Domain:" lines count too, including the longer
+  `industries.json` names.
 
 `unmatched` is one combined, deduplicated, length-capped string of
 phrases the tool found but couldn't match to anything in your reference
@@ -143,15 +177,22 @@ those lists. It's built to exclude anything already counted elsewhere
 details like marital status/religion/gender), so it stays a list of
 genuinely uncategorized phrases, not noise.
 
-`educations` keeps only degree/college/10th/12th mentions — grades
-(CGPA/SGPA/%) are always stripped out, and dates are kept only alongside a
-degree or college entry (a bare 10th/12th entry never carries one).
-`certifications` keeps only certificate-title-looking lines — bare
-issuer-and-year lines (`"Coursera - 2023"`) and any date are dropped.
+`educations` has one entry per qualification: the degree/12th/10th line
+plus the institution and place lines around it, which table layouts put on
+separate lines. Grades (CGPA/SGPA/%) and years are stripped.
+`certifications` keeps only certificate-title-looking lines. It drops bare
+issuer-and-year lines (`"Coursera - 2023"`), participation and appreciation
+notes, and validity/ID lines. Without a Certifications section, it takes
+lines elsewhere that name a certification outright ("Six Sigma Green Belt",
+"CCNA"). `projects` holds project titles only: explicit "Project Title:"
+labels anywhere, otherwise title-looking lines in the Projects section, not
+their descriptions.
 
-A duplicate or unsupported-type file's document looks different — just an
-`id`, a short `message`, and (for duplicates) a `duplicate_of` field —
-since there's no actual resume content to report.
+Duplicate, unsupported-type and error files get a short note document (an
+`id`, a `message`, and `duplicate_of` for duplicates). These notes go to a
+**separate index**, `<index>_notes` by default (`--meili-notes-index` to
+change it), so the resume index holds only real candidates. Re-runs check
+both indexes, so nothing is processed twice.
 
 ## Setting it up
 
@@ -197,6 +238,8 @@ won't be able to match anything from that list — and it prints a warning.
   Expertise"`, `"Skill Profile"`, `"Key Competencies"`, ...) — this is
   what lets the tool recognize far more skill-section headings than the
   handful of common ones it knows by default.
+- `skills_extra.json` and `industry_keywords.json` are covered under
+  "Where each field comes from" above.
 
 ### 4. Start MeiliSearch
 
@@ -220,15 +263,27 @@ python parse_resumes_structured.py path/to/your/resumes --meili-index resumes_st
 |---|---|---|
 | (first argument) | which folder of resumes to read | `input/resumes` |
 | `--workers` | how many resumes to process at once | number of CPU cores on your machine |
-| `--lookups-dir` | where the 5 reference lists live | `lookups` |
+| `--lookups-dir` | where the reference lists live | `lookups` |
 | `--hash-dir` | where the content-hash checkpoint file is stored | `hash_store_structured` |
 | `--meili-url` | the MeiliSearch server's address | `http://localhost:7700` |
 | `--meili-index` | the index name results are written into | `resumes_structured` |
 | `--meili-api-key` | your MeiliSearch master key, if you set one | read from `.env`'s `MEILI_API_KEY` |
+| `--meili-notes-index` | the index that gets duplicate/unsupported/error notes | `<meili-index>_notes` |
 
-The URL/API key are read from a `.env` file next to the script if present
-(`MEILI_URL=...`, `MEILI_API_KEY=...`) — keeping a real key out of the
-script itself and out of anything you might share or commit.
+The server address and key come from a `.env` file next to the script:
+
+```
+MEILI_URL=http://localhost:7700
+# MEILI_URL=https://<your-tunnel>.ngrok-free.dev
+MEILI_API_KEY=your-master-key
+```
+
+Leave exactly one `MEILI_URL` line uncommented: local Docker, or the ngrok
+tunnel to the shared server. `MEILI_API_KEY` must be the key of whichever
+server you pick. A real environment variable beats `.env`
+(`MEILI_URL=... python parse_resumes_structured.py` for a one-off run), and
+a command-line flag beats both. With no `MEILI_URL` anywhere, it uses
+`http://localhost:7700`.
 
 ## How it stays safe to re-run
 
@@ -338,13 +393,14 @@ curl -X POST 'http://localhost:7700/indexes/resumes_structured/search' \
   -d '{"q": "AutoCAD"}'
 ```
 
-**A note on filtering:** `skills`/`titles`/`industries`/`languages` are
-comma-separated strings here, not arrays — that was a deliberate choice
-for readability. It means MeiliSearch's `filter` parameter (which checks a
-field's value exactly, not "does this string contain X") doesn't work as
-a precise "show only resumes with skill X" lookup the way it would on an
-array field. Free-text search (the `q` parameter above) still works fine
-for finding a term anywhere in a resume's data.
+**Filtering:** filter on the array fields (`skills_list`, `titles_list`,
+`industries_list`, `languages_list`, `educations_list`,
+`certifications_list`), e.g. `"filter": "skills_list = \"AutoCAD\""`. An
+array filter matches one element exactly, so it's a precise "resumes with
+skill X" lookup. The tool makes these filterable on every run. It only
+*adds* to the index's filterable attributes and never replaces them, so
+settings added by hand survive re-runs. Free-text search (the `q`
+parameter above) still finds a term anywhere in a resume.
 
 MeiliSearch also ships a small built-in web UI for poking around — open
 `http://localhost:7700` in a browser. Note that this built-in UI doesn't
