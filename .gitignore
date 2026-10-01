@@ -1,4 +1,21 @@
+# Secrets -- MeiliSearch URL and API keys
 .env
-__pycache__/
+
+# Candidate data -- real resumes and the file-move manifest (lists names)
+input/
+
+# The parser's local content-hash checkpoint
 hash_store_structured/
-input/resumes/
+hash_store*/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
