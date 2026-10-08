@@ -1,0 +1,21 @@
+# Resume data -- real candidates' personal details, never commit
+Input/
+Output/
+classification/
+*.pdf
+*.docx
+*.doc
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets
+.env
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
