@@ -1,117 +1,129 @@
 """
-The one resume-parsing script for this project. Reads a folder of real
-resumes (PDF/DOCX/DOC/image), extracts name/email/phone/linkedin, matches
-skills/titles/industries/languages against your canonical lists (exact
-match only -- see match_exact below), pulls out education/certifications/
-projects/internships, and uploads one document per resume into a
-MeiliSearch index. Fully self-contained: no other script in this project
-is needed.
+parse_resumes.py  --  PART 1 of 2: READ resumes, WRITE JSON files.
 
-Checkpointing happens two ways:
-  - Against MeiliSearch itself: document IDs already in the index are
-    fetched once up front, so re-running never re-uploads a file whose
-    document is already there.
-  - Locally, via a content-hash index (hash_store_structured/), so an
-    unmodified duplicate under a different filename is recognized without
-    needing to re-parse or re-upload it.
+This script only parses. It never talks to MeiliSearch. The second script,
+upload_to_meilisearch.py, uploads what this one writes.
 
-Every input file gets a matching document -- a real result, a duplicate
-note, an unsupported-type note, or an error -- so the index alone
-explains every file you pointed the tool at.
+WHAT IT DOES, STEP BY STEP
+  1. Finds every file in the input folder: subfolders too, and the inside of .zip files.
+  2. Sorts the files into groups:
+       - unsupported : not a resume file (CSV, web page, video, ...)
+       - duplicate   : exactly the same content as an earlier file
+       - to parse    : everything else
+  3. Turns old .doc / .rtf / .odt files into .docx (needs LibreOffice).
+  4. Reads each remaining file and pulls out name, email, phone, LinkedIn, skills,
+     titles, industries, languages, education, certifications, projects, internships.
+  5. Decides if the file is really a resume (see "check_if_real_resume" below).
+  6. Saves everything under  output/<name>/
 
-Usage:
-    python parse_resumes_structured.py [folder_name] [--workers N]
-                                        [--meili-index NAME] [--lookups-dir DIR]
+WHAT YOU GET
+  output/<name>/real_resumes/<id>.json   one JSON file per REAL resume. Only real resumes.
+  output/<name>/rejected/errors.json         files that could not be read
+  output/<name>/rejected/invalid.json        read fine, but do not look like a resume
+  output/<name>/rejected/unsupported.json    not a resume file type
+  output/<name>/rejected/duplicates.json     same content as an earlier file
+  output/<name>/file_list.csv            every file and what happened to it
+  output/<name>/review/needs_review.json   real resumes worth a quick human check (the list only; nothing is removed)
 
-Requires a running MeiliSearch server, and skills.json/titles.json/
-industries.json/languages.json/normalized_category_mapping.json in
-lookups/ (a missing one just means that list won't match anything).
+WHAT IS NEW IN VERSION 2 (accuracy fixes, all checked in test_rules.py)
+  - Names: a line right after an address line is not a name; "Thanking you" and other
+    letter endings are not names; a first name and surname on two lines are joined.
+  - Not a resume: cover letters, certificates, statements, book pages and very long
+    documents with no contact details are rejected as "invalid" (with the reason).
+  - Titles: an organisation such as "Bhad Engineers" is no longer taken as a job title.
+  - Education: degrees written as sentences ("Completed Diploma in ... from ...") are found.
+  - Certifications: junk such as "year", "10th", "Udemy" or a lone word is dropped.
+  - LinkedIn: an address cut across two lines is joined.
+  - Resumes saved as web pages (.htm, or HTML under a .doc name) are now read.
+  - More industry clues, more heading names for projects and certifications.
+  - Every JSON records "parser_version", and review/needs_review.json lists doubtful resumes.
+
+HOW TO RUN
+  python parse_resumes.py  path/to/resumes  --name my_resumes
+
+Running it again is safe: resumes that already have a JSON file are skipped
+(use --redo to parse everything again).
+
+HOW THE CODE IS ORGANISED
+  The big middle section ("THE READING ENGINE") holds the rules for finding names,
+  skills and so on. It is copied unchanged from the earlier script so the results do
+  not change. Everything else (this header and the SIMPLE PART at the bottom) is
+  plain code: find files, sort them, parse them, save the JSON.
 """
 
 import os
 import re
-import time
+import csv
 import glob
+import json
+import time
 import shutil
 import hashlib
 import zipfile
+import zlib
 import tempfile
 import argparse
 import subprocess
 import unicodedata
 import pymupdf
 try:
-    import re2  # optional: a faster regex engine for the big canonical-list matcher
+    import re2  # optional: a faster regex engine, same results
 except ImportError:
     re2 = None
-import meilisearch
-from meilisearch.errors import MeilisearchApiError
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 
-
-def _load_dotenv():
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if not os.path.exists(env_path):
-        return
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
-_load_dotenv()
-
-DEFAULT_INPUT_DIR = os.path.join("input", "resumes")
+# ---- settings used by the reading engine ----
 DEFAULT_LOOKUPS_DIR = "lookups"
-DEFAULT_HASH_DIR = "hash_store_structured"
-# Set MEILI_URL in .env (local Docker, or the ngrok tunnel to the shared server).
-DEFAULT_MEILI_URL = os.environ.get("MEILI_URL", "http://localhost:7700")
-DEFAULT_MEILI_INDEX = "resumes_structured"
-DEFAULT_MEILI_API_KEY = os.environ.get("MEILI_API_KEY")
-# Duplicate / unsupported / error notes go to their own index ("<index>_notes"
-# by default) so the resume index holds only real candidates.
-NOTES_INDEX_SUFFIX = "_notes"
-# Merged into (never replacing) the index's existing filterable attributes.
-# The *_list fields are real arrays, one item per element, so IN / = match a
-# single skill exactly; the comma-string versions stay for display.
-RESUME_FILTERABLE_ATTRIBUTES = [
-    "skills_list", "titles_list", "industries_list", "languages_list",
-    "skills", "titles", "industries", "languages",
-    "name", "email", "phone", "linkedin", "educations", "certifications", "projects",
-    "educations_list", "certifications_list",
-]
 NORMALIZED_CATEGORY_MAPPING_FILE = "normalized_category_mapping.json"
+# The sections a resume can have. "has all sections" means all seven are filled.
+CORE_SECTIONS = ("skills", "titles", "industries", "educations", "certifications", "projects", "internships")
+PARSER_VERSION = "2.0"   # saved inside every resume JSON, so you can tell which rules produced it
 
+# ---- file types ----
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 DOC_MIME = "application/msword"
+RTF_MIME = "application/rtf"
+ODT_MIME = "application/vnd.oasis.opendocument.text"
 PDF_MIME = "application/pdf"
+HTML_MIME = "text/html"
 IMAGE_MIMES = {"image/jpeg", "image/png", "image/bmp", "image/tiff"}
-SUPPORTED_MIMES = {PDF_MIME, DOCX_MIME, DOC_MIME} | IMAGE_MIMES
+CONVERT_MIMES = {DOC_MIME, RTF_MIME, ODT_MIME, HTML_MIME}   # LibreOffice turns these into .docx first
+CSV_MIME = "text/x-candidate-csv"   # only candidate lists (see detect_candidate_csv), never other CSV files
+SUPPORTED_MIMES = {PDF_MIME, DOCX_MIME} | CONVERT_MIMES | IMAGE_MIMES | {CSV_MIME}
 
+
+# =====================================================================
+#                        THE READING ENGINE
+#   (unchanged from the earlier script: file types, headings, names,
+#    skills, titles, industries, education, certifications, projects)
+# =====================================================================
 
 def detect_mime_type(path):
     """Identifies a file's real type from its content ('magic bytes'), not
     its filename extension, which can lie."""
     try:
         with open(path, "rb") as f:
-            header = f.read(8)
+            beginning = f.read(512)
     except OSError:
         return None
+    header = beginning[:8]
     if header.startswith(b"%PDF-"):
         return PDF_MIME
     if header.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"):
         return DOC_MIME
+    if header.startswith(b"{\\rtf"):
+        return RTF_MIME
     if header.startswith(b"PK\x03\x04"):
         try:
             with zipfile.ZipFile(path) as z:
-                if "word/document.xml" in z.namelist():
+                names = z.namelist()
+                if "word/document.xml" in names:
                     return DOCX_MIME
-        except (zipfile.BadZipFile, OSError):
+                if "mimetype" in names and z.read("mimetype").strip() == ODT_MIME.encode():
+                    return ODT_MIME
+        except (zipfile.BadZipFile, OSError, KeyError):
             pass
         return None
     if header.startswith(b"\xFF\xD8\xFF"):
@@ -122,7 +134,26 @@ def detect_mime_type(path):
         return "image/bmp"
     if header[:4] in (b"II*\x00", b"MM\x00*"):
         return "image/tiff"
+    # A web page (some job sites save resumes as HTML, even under a .doc name).
+    start_of_text = beginning.lstrip(b"\xef\xbb\xbf \r\n\t").lower()
+    if start_of_text.startswith((b"<!doctype html", b"<html", b"<head", b"<meta")):
+        return HTML_MIME
+    if detect_candidate_csv(beginning):
+        return CSV_MIME
     return None
+
+
+def detect_candidate_csv(beginning):
+    """True for a CSV/TSV export that lists candidates, one per row, recognised by its header line:
+    an ATS pipeline export (name, resume_match, ...), a WorkIndia export (Sr. No., Full Name, Mobile No., ...)
+    or a LinkedIn Recruiter export (Name, Current Title, ..., LinkedIn URL). Company lists, statistics and
+    bank statements are not."""
+    first_line = beginning.decode("utf-8-sig", "ignore").split("\n", 1)[0].lower()
+    if "name" not in first_line:
+        return False
+    return ("resume_match" in first_line and "pipeline" in first_line
+            or "full name" in first_line and "mobile no" in first_line
+            or "current title" in first_line and "linkedin url" in first_line)
 
 
 # ============================== Heading vocabularies ==============================
@@ -225,6 +256,8 @@ SECTION_PHRASES = {
         "projects worked on", "project profile", "project summary", "live projects",
         "college projects", "engineering projects", "research projects",
         "academic project details", "projects and internships", "project experience details",
+        "selected projects", "relevant projects", "software projects", "project highlights",
+        "work samples", "portfolio", "projects portfolio", "key project", "project handled",
     ],
     "certifications": [
         # not "certificate" alone: that's an education-table column header
@@ -235,6 +268,9 @@ SECTION_PHRASES = {
         "certifications and training", "training and certifications",
         "certifications and achievements", "other certifications", "technical certifications",
         "online certifications", "certified courses", "additional certifications",
+        "courses completed", "courses attended", "online courses", "professional courses",
+        "licenses", "licences", "accreditations", "credentials", "certifications and licenses",
+        "certificates and courses", "certification details", "certificate details",
     ],
     "languages": [
         "languages", "languages known", "language", "language proficiency", "languages spoken",
@@ -320,7 +356,18 @@ _NAME_STOPWORDS = {
     "aggregate", "board", "qualification", "higher", "secondary", "marks", "grade", "result",
     "institute", "knowledge", "basic", "areas", "good", "learner", "overview", "exposure",
     "dept", "department", "execution", "field", "end", "section", "team", "division",
+    # closing lines of a cover letter ("Thanking you", "Yours faithfully") and similar phrases
+    "thanking", "thank", "thanks", "you", "yours", "faithfully", "sincerely", "regards",
+    "signature", "respected", "hereby", "declare", "enclosed", "attached", "kindly",
 }
+# A line like these just before a candidate means the candidate is part of an address
+# ("Gayatri Nagar," then "Vizianagaram"), not a name.
+_ADDRESS_LINE = re.compile(
+    r"\b(address|s/o|d/o|w/o|c/o|house\s*no|door\s*no|flat|street|road|nagar|colony|layout|village|"
+    r"taluk|tq|dist|district|post|pin(?:code)?|near|opp(?:osite)?|apartment|cross|sector|plot)\b",
+    re.IGNORECASE)
+_BARE_ADDRESS_LABEL = re.compile(
+    r"^(?:permanent\s+|current\s+|present\s+|postal\s+|home\s+|office\s+|mailing\s+)?address\s*:?$", re.IGNORECASE)
 _NAME_PREFIX = re.compile(
     r'^(?:(?:c\.?\s?v\.?|resume|bio-?\s?data|curriculum\s+vitae)\s+of\s+|'
     r'(?:mr|mrs|ms|miss|dr|er|shri|sri|smt|kum)\.?\s+)', re.IGNORECASE)
@@ -482,10 +529,66 @@ def get_lines_with_style(path):
     import pytesseract
     poppler_path = _configure_ocr_tools()
     lines = []
-    for img in convert_from_path(path, dpi=200, poppler_path=poppler_path):
+    try:
+        pages = list(convert_from_path(path, dpi=200, poppler_path=poppler_path))
+    except Exception:
+        pages = _render_pages_with_pymupdf(path)   # poppler cannot open a damaged PDF, pymupdf can repair it
+    for img in pages:
         for raw_line in pytesseract.image_to_string(img).split("\n"):
             if raw_line.strip():
                 lines.append((raw_line.strip(), 0.0, False, "ocr"))
+    if sum(len(t) for t, *_ in lines) < 100:
+        lines = _ocr_embedded_pictures(path) or lines
+    return lines
+
+
+def _render_pages_with_pymupdf(path, dpi=200, max_pages=12):
+    """The pages of a PDF as pictures, using pymupdf (it opens PDFs with a broken structure)."""
+    import io
+    from PIL import Image
+    pages = []
+    pdf = pymupdf.open(path)
+    try:
+        for number, page in enumerate(pdf):
+            if number >= max_pages:
+                break
+            pages.append(Image.open(io.BytesIO(page.get_pixmap(dpi=dpi).tobytes("png"))))
+    finally:
+        pdf.close()
+    return pages
+
+
+def _ocr_embedded_pictures(path, max_pages=4):
+    """Some scanned PDFs draw a page that renders blank while the scan itself is stored inside as a
+    picture. Read those pictures directly (greyscale, at most 3000 pixels wide)."""
+    import io
+    from PIL import Image
+    import pytesseract
+    Image.MAX_IMAGE_PIXELS = None
+    _configure_ocr_tools()
+    lines = []
+    try:
+        pdf = pymupdf.open(path)
+    except Exception:
+        return lines
+    try:
+        for page_number, page in enumerate(pdf):
+            if page_number >= max_pages:
+                break
+            for info in page.get_images(full=True):
+                try:
+                    picture = Image.open(io.BytesIO(pdf.extract_image(info[0])["image"])).convert("L")
+                except Exception:
+                    continue
+                if min(picture.size) < 200:
+                    continue
+                if picture.size[0] > 3000:
+                    picture = picture.resize((3000, int(picture.size[1] * 3000 / picture.size[0])))
+                for raw_line in pytesseract.image_to_string(picture).split("\n"):
+                    if raw_line.strip():
+                        lines.append((raw_line.strip(), 0.0, False, "ocr"))
+    finally:
+        pdf.close()
     return lines
 
 
@@ -501,7 +604,24 @@ def get_lines_from_image(path):
     return lines
 
 
+TEXT_MIME = "text/plain"
+
+
+def get_lines_from_text(path):
+    """Plain text (txt, md, code, spreadsheets turned into text, ...): every line, no style."""
+    raw = open(path, "rb").read()
+    for encoding in ("utf-8-sig", "utf-16", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return [(line.strip(), 0.0, False, "text") for line in text.splitlines() if line.strip()]
+
+
 def resolve_lines_getter(mime_type):
+    if mime_type == TEXT_MIME:
+        return get_lines_from_text
     return get_lines_from_image if mime_type in IMAGE_MIMES else get_lines_with_style
 
 
@@ -551,8 +671,17 @@ def find_phone(text):
 
 
 def find_linkedin(text):
-    m = re.search(r'linkedin\.com/in/[\w-]+', text)
-    return m.group(0) if m else None
+    """'linkedin.com/in/some-name'. The address is sometimes cut by a line break
+    ('linkedin.com/in/some-name-' then '12345' on the next line); the two pieces
+    are joined, but only when the first piece is clearly unfinished."""
+    m = re.search(r'linkedin\.com/in/([\w%-]*)', text, re.IGNORECASE)
+    if not m:
+        return None
+    slug = m.group(1)
+    next_line = re.match(r'[ \t]*\n[ \t]*([\w%-]{3,})(?:[/?#]\S*)?[ \t]*(?:\n|$)', text[m.end():])
+    if next_line and (not slug or slug.endswith('-')):
+        slug += next_line.group(1)
+    return f"linkedin.com/in/{slug}" if len(slug) >= 3 else None
 
 
 def _collapse_letter_spacing(text):
@@ -646,11 +775,29 @@ def find_name(lines, headers=None, titles_matcher=None, email=None):
     # down ("Percentage", "Higher Secondary") must not beat the name there.
     by_size = lambda ls: sorted(ls, key=lambda line: line[1], reverse=True)
     candidates = labelled + by_size(lines[:12]) + by_size(lines)
-    for text, size, is_bold, font in candidates:
+    labelled_ids = {id(entry) for entry in labelled}
+    sizes_on_top = sorted(entry[1] for entry in lines[:12])
+    typical_size = sizes_on_top[len(sizes_on_top) // 2] if sizes_on_top else 0
+    email_letters = re.sub(r"[^a-z]", "", (email or "").split("@")[0].lower())
+    line_index = {}   # text of a line -> where it is on the page
+    for i, entry in enumerate(lines):
+        line_index.setdefault(entry[0].strip(), i)
+    for entry in candidates:
+        text, size, is_bold, font = entry
         clean = text.strip()
         if not clean or len(clean) < 3:
             continue
         if clean in header_set:
+            continue
+        # a line right after an address line is part of the address ("Gayatri Nagar," / "Vizianagaram").
+        # Not when that line is just the label "Address" (many templates print the label before
+        # the name), and never for the biggest text on the page, which is the name.
+        position = line_index.get(clean)
+        if (position is not None and position > 0 and id(entry) not in labelled_ids
+                and size < typical_size * 1.3
+                and _ADDRESS_LINE.search(lines[position - 1][0])
+                and re.search(r"[\d,]|\b(?:address|s/o|d/o|w/o|c/o)\b", lines[position - 1][0], re.IGNORECASE)
+                and not _BARE_ADDRESS_LABEL.match(lines[position - 1][0].strip())):
             continue
         if NAME_OF_THE_PATTERN.match(clean):
             continue
@@ -699,8 +846,173 @@ def find_name(lines, headers=None, titles_matcher=None, email=None):
             continue
         if DATE_PATTERN.search(clean) or DURATION_PATTERN.search(clean):
             continue
-        return _strip_trailing_title(clean, titles_matcher)
+        # a short ALL-CAPS word like "JLT" or "TCS" is a company, unless the email says otherwise
+        if len(clean.split()) == 1 and clean.isupper() and len(clean) <= 4 and clean.lower() not in email_letters:
+            continue
+        # deep in the page a line is often a place, skill or sentence. There the email must agree:
+        # a real name shares a word with it. (Without an email nothing can be checked, so it stays.)
+        if email_letters and id(entry) not in labelled_ids and line_index.get(text.strip(), 0) >= 12:
+            words = [re.sub(r"[^a-z]", "", w.lower()) for w in clean.split()]
+            if not any(len(w) >= 3 and (w in email_letters or (len(w) >= 4 and w[:4] in email_letters)) for w in words):
+                continue
+        result = _strip_trailing_title(clean, titles_matcher)
+        if len(result.split()) == 1:
+            result = _join_split_name(result, line_index.get(text.strip()), size, lines)
+        return result
     return _name_from_email(email)
+
+
+_ONE_WORD = re.compile(r"^(?:[A-Z][A-Za-z'’.-]{2,19}|[A-Z]{3,20})$")
+
+
+def _join_split_name(first_word, position, size, lines):
+    """Some resumes put the first name and the surname on two lines ('Mufaddal' then
+    'Tandawala'). If the line next to a one-word name is also one plain capitalised
+    word, in the same font size and nothing like a place, skill, title or heading,
+    the two together are the name."""
+    if position is None or position > 15:
+        return first_word
+    for neighbour_position, word_goes_first in ((position + 1, False), (position - 1, True)):
+        if not 0 <= neighbour_position < len(lines):
+            continue
+        text, neighbour_size, _, _ = lines[neighbour_position]
+        word = text.strip()
+        if not _ONE_WORD.match(word) or abs(neighbour_size - size) > 0.6:
+            continue
+        if word.isupper() != first_word.isupper():
+            continue   # 'Karan' next to 'KAUSHIK' is probably not one name
+        normalized = word.lower()
+        if (normalized in NAME_BLOCKLIST or normalized in KNOWN_SECTIONS or normalized in _NAME_STOPWORDS
+                or normalized in _NAME_STRUCT_WORDS or PLACE_PATTERN.search(word) or junk_level(word) > 0
+                or is_job_title(word) or _edu_level(word)
+                or (_skills_matcher and normalize_key(word) in _skills_matcher[1])
+                or (_languages_matcher and match_languages(word, _languages_matcher))):
+            continue
+        return f"{word} {first_word}" if word_goes_first else f"{first_word} {word}"
+    return first_word
+
+
+# ------------------------- Name verification and recovery -------------------------
+# find_name() guesses from layout (the biggest text near the top). When the real
+# name fails one of its filters it moves on to the next line, which is often a
+# heading or phrase ("Class XII", "Driving Car"). refine_name() double-checks the
+# result. Precision first: a name is only replaced when it looks like junk
+# (is_junk_name) AND a better candidate turns up -- a name that merely differs
+# from the email address is left alone, because plenty of real names do.
+
+_term_words = set()  # every word that appears in the skills / titles / industries lists
+_NAME_STRUCT_WORDS = {
+    "class", "skype", "resume", "curriculum", "vitae", "declaration", "details", "highlights",
+    "married", "unmarried", "subject", "subjects", "description", "responsibilities",
+    "formatting", "scenarios", "miscellaneous", "india", "frontend", "backend", "fullstack",
+    "employee", "technical", "experience", "education", "profile", "contact", "address",
+    "email", "mobile", "phone", "skills", "skill", "projects", "project", "certifications",
+    "personal", "objective", "summary", "technology", "technologies", "development",
+    "developer", "engineer", "engineering", "services", "company", "limited", "pvt",
+}
+_NAME_LEAD_LABEL = re.compile(
+    r'^\s*(?:skype(?:\s*id)?|name|full\s*name|candidate(?:\s*name)?)\b[\s.;:,\-–]*', re.IGNORECASE)
+_FILENAME_NOISE = re.compile(
+    r'^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-?|naukri[_\- ]?|iimjobs[_\- ]?|'
+    r'updazz[_\- ]?|copy\s+of\s+|resume[_\- ]?|cv[_\- ]?)+', re.IGNORECASE)
+_FILENAME_DROP = {"resume", "cv", "profile", "final", "updated", "new", "docx", "pdf", "doc", "copy",
+                  "latest", "curriculum", "vitae", "format", "of"}
+
+
+def _build_term_words(*term_lists):
+    words = set()
+    for terms in term_lists:
+        for t in terms or []:
+            words.update(re.findall(r'[a-z]{3,}', str(t).lower()))
+    return words
+
+
+def _alpha_tokens(text, min_len=3):
+    return [t for t in re.findall(r'[a-z]+', text.lower()) if len(t) >= min_len]
+
+
+def junk_level(name):
+    """0 = looks like a person; 1 = might not be (half or more of its words
+    appear in the skills/titles/industries lists, but real names like 'Jain' or
+    'Das' do too); 2 = reads like a heading, phrase or ID."""
+    if not name:
+        return 0
+    if re.search(r'[;:@/|]', name) or any(re.search(r'[A-Za-z]', w) and re.search(r'\d', w) for w in name.split()):
+        return 2
+    tokens = _alpha_tokens(name)
+    if not tokens:
+        return 0
+    if any(t in _NAME_STRUCT_WORDS for t in tokens):
+        return 2
+    if not _term_words:
+        return 0
+    hits = sum(1 for t in tokens if t in _term_words)
+    if hits == len(tokens) and (len(tokens) == 1 or hits >= 3):
+        return 2
+    return 1 if 2 * hits >= len(tokens) else 0
+
+
+def is_junk_name(name):
+    return junk_level(name) > 0
+
+
+def name_from_filename(filename):
+    """'Naukri_Priyanka.k[3y_6m].pdf' -> 'Priyanka K'; None if it doesn't read like a name."""
+    stem = _FILENAME_NOISE.sub("", os.path.splitext(filename or "")[0])
+    stem = re.sub(r'\[[^\]]*\]|\([^)]*\)', " ", stem)
+    words = [w for w in re.sub(r'[\d_\-.]+', " ", stem).split()
+             if w.isalpha() and w.lower() not in _FILENAME_DROP]
+    if not 1 <= len(words) <= 4 or len("".join(words)) < 5:
+        return None
+    candidate = " ".join(w.capitalize() for w in words)
+    return None if is_junk_name(candidate) else candidate
+
+
+def _namey(candidate):
+    letters = re.sub(r'[^A-Za-z]', '', candidate or "")
+    return len(letters) >= 5 and re.search(r'[aeiouAEIOU]', letters) is not None and not is_junk_name(candidate)
+
+
+def _agrees(candidate, hints):
+    """True when some word of the name appears in (or starts like) the email
+    local part or the filename-derived name."""
+    for t in _alpha_tokens(candidate):
+        for h in hints:
+            if t in h or (len(h) >= 5 and h in t) or (len(t) >= 4 and t[:4] in h):
+                return True
+    return False
+
+
+def refine_name(name, email, phone, linkedin, filename, lines, headers):
+    """(name, source). source: page | page_match | filename | email.
+
+    A name is kept as is unless it looks junk AND does not match the email
+    address or the filename (matching either is strong evidence it is right,
+    whatever words it contains). A replacement is the first line on the page
+    that matches the email/filename; only a strongly junk name (a heading,
+    phrase or ID) may be replaced by a name built from the filename or email,
+    and only for a file that has contact details."""
+    cleaned = _NAME_LEAD_LABEL.sub("", name).strip() if name else name
+    if cleaned and cleaned != name and junk_level(cleaned) == 0:
+        name = cleaned
+    from_file = name_from_filename(filename)
+    from_email = _name_from_email(email)
+    hints = [re.sub(r'[^a-z]', '', s.lower()) for s in ((email or "").split("@")[0], from_file or "")]
+    hints = [h for h in hints if len(h) >= 4]
+    level = junk_level(name)
+    if name and (level == 0 or (hints and _agrees(name, hints))):
+        return name, "page"
+    if hints:
+        for text, *_ in lines[:80]:
+            candidate = find_name([(text, 12.0, False, "x")], headers, _titles_matcher, None)
+            if candidate and junk_level(candidate) == 0 and _agrees(candidate, hints):
+                return candidate, "page_match"
+    if (not name or level == 2) and (email or phone or linkedin):
+        if from_file and _namey(from_file):
+            return from_file, "filename"
+        if from_email and _namey(from_email):
+            return from_email, "email"
+    return name, "page"
 
 
 def load_skill_heading_vocab(lookups_dir):
@@ -741,6 +1053,17 @@ def normalize_heading(text):
     return re.sub(r"\s+", " ", t).strip().lower()
 
 
+_NO_SPACE_HEADINGS = {}
+
+
+def _headings_without_spaces():
+    if not _NO_SPACE_HEADINGS:
+        for phrase, category in _PHRASE_TO_SECTION.items():
+            if " " in phrase:
+                _NO_SPACE_HEADINGS.setdefault(phrase.replace(" ", ""), category)
+    return _NO_SPACE_HEADINGS
+
+
 def heading_category(text, styled, skill_vocab=None):
     """(category, exact) if this whole line is a section heading, else None."""
     # "WORK EXPERIENCE: (Total 15 Years)" -- judge the heading without its note
@@ -752,6 +1075,8 @@ def heading_category(text, styled, skill_vocab=None):
         return None
     if norm in _PHRASE_TO_SECTION:
         return _PHRASE_TO_SECTION[norm], True
+    if len(norm) >= 8 and " " not in norm and norm in _headings_without_spaces():
+        return _headings_without_spaces()[norm], True   # some PDFs lose every space: "CAREEROBJECTIVE"
     if skill_vocab and norm in skill_vocab:
         return "skills", True
     if not styled or len(norm.split()) > 4 or re.search(r"[\d@]", text):
@@ -1131,6 +1456,7 @@ def extract_educations(sections):
 
     def emit(parts):
         text = ", ".join(p for p in (_clean_edu_part(x) for x in parts[:4]) if p)
+        text = re.sub(r'\s+(?:in|of|from)\s*[,;]?$', '', text).strip()   # "MCA in" with nothing after it
         key = re.sub(r'[^a-z0-9]', '', text.lower())
         if key and key not in seen and len(text) >= 3:
             seen.add(key)
@@ -1140,8 +1466,15 @@ def extract_educations(sections):
         entries, pending = [], []
         lines = [strip_grades(l) for l in split_lines(raw)]
         for line in lines:
+            line = re.sub(r'[\ue000-\uf8ff\u25aa\u25cf\u2022]', '', line).strip()
+            if _RESPONSIBILITY_HEADING.match(line):
+                break   # what follows is a project or job description, not a qualification
             if not line or DISCONTINUED_PATTERN.search(line):
                 continue
+            if _looks_like_duty(line) and not _edu_level(line):
+                continue
+            if _CERT_NAMED.search(line) and not _edu_level(line):
+                continue   # "AMFI Certified" is a certification, not a qualification
             if re.fullmatch(r'[\d\s./%()\-–:]+', line) or _EDU_TABLE_HEADER.fullmatch(line):
                 continue
             if not _clean_edu_part(line):
@@ -1173,11 +1506,68 @@ def extract_educations(sections):
     return out
 
 
+# Education written as a sentence ("Completed Diploma in Mechanical Engineering from XYZ
+# College"). Used only when the Education section gave nothing. The short forms
+# BE / ME / BA / MA must be capitals, or the ordinary word "be" would match.
+_DEGREE_IN_SENTENCE = re.compile(
+    r"\b(?:(?i:diploma|b\.?\s?tech|m\.?\s?tech|mba|pgdm|mca|bca|b\.?\s?sc|m\.?\s?sc|b\.?\s?com|m\.?\s?com|"
+    r"bba|ph\.?\s?d|bachelor|master|post[- ]graduate)|B\.?E\.?|M\.?E\.?|B\.?A\.?|M\.?A\.?)(?![A-Za-z])")
+_SENTENCE_END = re.compile(r"\.\s|;|\s[-–—]\s|\s\|\s|\s+with\s|\s+where\s|\s+and\s+(?:I|have|am|my)\b|\s+I\s+")
+_PROSE_VERBS = re.compile(r"\b(seek|seeking|looking|aspire|aspiring|want|wish|willing|ability|knowledge|"
+                          r"experience|worked|working|responsible|handled)\b", re.IGNORECASE)
+
+
+def extract_educations_from_sentences(full_text):
+    """Up to three education entries found in running text, or []."""
+    found, seen = [], set()
+    for raw_line in full_text.split("\n"):
+        line = raw_line.strip(" \t" + BULLET_CHARS + "➢❖▪●*>-")
+        if not line or len(line.split()) > 30:
+            continue
+        match = _DEGREE_IN_SENTENCE.search(line)
+        if not match or not re.search(r"\b(from|in|at)\b|\(", line[match.end():], re.IGNORECASE):
+            continue
+        entry = line[match.start():]
+        end = _SENTENCE_END.search(entry)
+        if end:
+            entry = entry[:end.start()]
+        entry = _clean_edu_part(strip_grades(entry))
+        if len(entry) < 8 or len(entry.split()) > 14 or _PROSE_VERBS.search(entry):
+            continue
+        key = re.sub(r"[^a-z0-9]", "", entry.lower())
+        if key not in seen:
+            seen.add(key)
+            found.append(entry)
+        if len(found) == 3:
+            break
+    return found
+
+
 _CERT_NOISE = re.compile(
     r'^(does\s+not\s+expire|credential\s+id\b|issued\b|expires?\b|valid\s+(till|until)\b|'
     r'certificate\s+no\b|id\s*[:#]|link\b|url\b)', re.IGNORECASE)
 _CERT_PARTICIPATION = re.compile(r'\b(participat\w*|attended|volunteer\w*|appreciation|received|awarded|won|winner)\b',
                                  re.IGNORECASE)
+# A line that describes a job duty ("Prepare daily production material ...", "Handling day to day
+# incidents ...") is never a certification or a qualification, even when a wrongly cut section holds it.
+_DUTY_VERB = re.compile(
+    r'^(process|prepare|dispatch|perform|conduct|provid\w*|handl\w*|ensur\w*|support\w*|monitor\w*|assist\w*|'
+    r'maintain\w*|manag\w*|coordinat\w*|develop\w*|implement\w*|execut\w*|prepar\w*|review\w*|'
+    r'resolv\w*|train\w*|lead\w*|plan\w*|generat\w*|creat\w*|analy[sz]\w*|respond\w*|verif\w*|'
+    r'check\w*|updat\w*|attend\w*|follow\w*|report\w*|negotiat\w*|liais\w*|oversee\w*|drive\w*)\b',
+    re.IGNORECASE)
+_RESPONSIBILITY_HEADING = re.compile(r'^(?:key\s+|roles?\s*(?:&|and)\s*)?responsib\w*\s*:?$', re.IGNORECASE)
+_SKILLS_LABEL_LINE = re.compile(r'^(?:[\w&/]+\s+){0,2}skills?\s*:', re.IGNORECASE)
+_DATE_RANGE_LINE = re.compile(
+    r'\b(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?(?:19|20)\d{2}\s*[-\u2013\u2014]+\s*'
+    r'(?:(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?(?:19|20)\d{2}|present|till\s+date|current)',
+    re.IGNORECASE)
+
+
+def _looks_like_duty(line):
+    return bool(_DUTY_VERB.match(line.lstrip(" \u2022-*>")) or _RESPONSIBILITY_HEADING.match(line.strip()))
+
+
 _CERT_LEADING_LABEL = re.compile(r'^(?:certifications?|certificates?|courses?)\s*[:\-–]\s*', re.IGNORECASE)
 # A certification named outright, for lines outside a Certifications section.
 _CERT_NAMED = re.compile(
@@ -1220,6 +1610,18 @@ def extract_certifications(sections):
     kept = []
     for line, strict in candidates:
         line = _CERT_LEADING_LABEL.sub('', line).strip()
+        if strict and _SKILLS_LABEL_LINE.match(line):
+            continue
+        if not strict:
+            # the certifications text ran on into a job entry ("Royal Enfield  MAY 2018 - MAY 2019"):
+            # everything from there on belongs to the experience section
+            if _DATE_RANGE_LINE.search(line) and not _CERT_STRONG.search(line) and not re.search(
+                    r'certif|course|diploma|training', line, re.IGNORECASE):
+                break
+            if (_looks_like_duty(line) or _SKILLS_LABEL_LINE.match(line)) and not _CERT_STRONG.search(line):
+                continue
+            if re.search(r'\binternship\b', line, re.IGNORECASE) and not _CERT_STRONG.search(line):
+                continue
         if len(line) > 160 or len(line.split()) > (12 if strict else 22):
             continue
         if line[:1].islower() or _CERT_NOISE.search(line):
@@ -1237,9 +1639,30 @@ def extract_certifications(sections):
         line = DATE_PATTERN.sub('', line)
         line = re.sub(r'\s{2,}', ' ', line)
         line = clean_entry_tail(line).strip(" .,-()")
-        if line and len(line) >= 2:
-            kept.append(line)
+        if not line or len(line) < 2 or _is_junk_certification(line):
+            continue
+        kept.append(line)
     return list(dict.fromkeys(kept))
+
+
+_CERT_JUNK_WORDS = {
+    "year", "years", "month", "months", "date", "duration", "grade", "score", "percentage",
+    "certificate", "certificates", "certification", "certifications", "course", "courses",
+    "training", "trainings", "information", "additional information", "degree", "associate",
+    "online", "udemy", "coursera", "edx", "linkedin learning", "other", "others", "none", "na", "n/a",
+}
+
+
+def _is_junk_certification(line):
+    """True for entries that are not a certification name: a single stray word
+    ('year', 'Udemy', 'Python'), a school class ('10th'), a heading. A one-word
+    entry is kept only if it clearly names a certification ('CCNA', 'PMP')."""
+    lowered = line.lower().strip()
+    if lowered in _CERT_JUNK_WORDS or re.match(r'^\d{1,2}\s?(st|nd|rd|th)\b', lowered):
+        return True
+    if len(line.split()) == 1 and not _CERT_STRONG.search(line):
+        return True
+    return False
 
 
 # "Project Title: X" / "Name of the Project: X" (strong) and "Project 2: X" /
@@ -1272,6 +1695,7 @@ def _unbalanced(text):
 
 
 def _clean_project_title(text):
+    text = re.sub(r'[-]', '', text).replace('\xa0', ' ')   # icon-font bullets and no-break spaces
     text = text.strip().strip('"\'“”‘’*').strip()
     text = re.sub(r'\s*[:\-–—]\s*$', '', text)
     text = re.sub(r'\s{2,}', ' ', text)
@@ -1347,6 +1771,26 @@ def _is_tech_list(line):
         >= len(parts) / 2
 
 
+_MONTH_YEAR_ONLY = re.compile(
+    r'^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*(?:19|20)\d{2}(?:\s*[-\u2013]\s*\S+)?$', re.IGNORECASE)
+
+
+def _good_project_title(title):
+    """False for the leftovers of a wrapped line ("Bank)", "GenAI)"), a bare date ("Jan 2026"), or one
+    generic word ("Implementation"). Applied to every project title that is saved."""
+    if len(re.sub(r'[^A-Za-z]', '', title)) < 4:
+        return False
+    if title.count(")") > title.count("("):
+        return False
+    if _MONTH_YEAR_ONLY.match(title.strip()):
+        return False
+    words = title.split()
+    if len(words) == 1 and title.lower().strip(" .") in {
+            "implementation", "supporting", "support", "development", "testing", "project", "projects"}:
+        return False
+    return True
+
+
 def extract_projects(sections):
     """Project titles, one per project. Explicit labels win, wherever they
     are -- 'Project Title: X' inside a job entry counts too -- and 'Project
@@ -1360,11 +1804,12 @@ def extract_projects(sections):
     if any(strong for strong, _ in labels):
         labels = [(st, v) for st, v in labels if st]
     if labels:
-        return list(dict.fromkeys(v for _, v in labels))
+        return list(dict.fromkeys(v for _, v in labels if _good_project_title(v)))
     titles, prev_title = [], False
     for line in project_lines:
         if _looks_like_title(line) and not _is_tech_list(line):
-            if prev_title and titles and line.isupper() == titles[-1].isupper() and not titles[-1].endswith(":"):
+            if prev_title and titles and ((line.isupper() == titles[-1].isupper() and not titles[-1].endswith(":"))
+                                          or titles[-1].count("(") > titles[-1].count(")")):
                 titles[-1] = titles[-1] + " " + line  # title wrapped across lines
             else:
                 titles.append(line)
@@ -1372,7 +1817,7 @@ def extract_projects(sections):
         else:
             prev_title = False
     titles = [_clean_project_title(re.split(r'\s+\|\s+|\s{3,}', t)[0]) for t in titles]
-    return list(dict.fromkeys(t for t in titles if t))
+    return list(dict.fromkeys(t for t in titles if t and _good_project_title(t)))
 
 
 def build_unmatched_string(unmatched_skills, unmatched_titles, unmatched_industries, all_matched,
@@ -1490,11 +1935,22 @@ def _title_core_word(title):
     return core.split()[-1] if core.split() else ""
 
 
+# A phrase ending in one of these names an organisation ("Bhad Engineers", "ABC Consultants"),
+# not a person's job: nobody's title is the plural "Engineers".
+_ORGANISATION_WORDS = {
+    "engineers", "consultants", "associates", "developers", "managers", "analysts", "executives",
+    "officers", "partners", "services", "systems", "solutions", "technologies", "enterprises",
+    "industries", "group", "consultancy", "infotech", "labs", "works", "traders", "builders",
+}
+
+
 def is_job_title(text):
     """Short, title-cased, no sentence words, and ends in an occupation word."""
     t = text.strip(" :-–—•*.,")
     words = t.split()
     if not 1 <= len(words) <= 7 or len(t) > 70:
+        return False
+    if words[-1].lower().strip("().,") in _ORGANISATION_WORDS:
         return False
     if t[:1].islower() or _TITLE_BAD_WORDS.search(t) or _PROSE_START.match(t):
         return False
@@ -1797,9 +2253,11 @@ def _init_worker(lookups_dir):
     _industries_matcher = build_matcher(industries) if industries else None
     _languages_matcher = build_language_matcher(languages) if languages else None
     _skill_heading_vocab = load_skill_heading_vocab(lookups_dir)
+    global _term_words
+    _term_words = _build_term_words(skills, titles, industries)
 
 
-def parse_resume(path, mime_type):
+def parse_resume(path, mime_type, filename=""):
     lines = resolve_lines_getter(mime_type)(path)
     full_text = "\n".join(t for t, _, _, _ in lines)
 
@@ -1809,6 +2267,7 @@ def parse_resume(path, mime_type):
     phone = find_phone(full_text)
     linkedin = find_linkedin(full_text)
     name = find_name(lines, headers, _titles_matcher, email)
+    name, name_source = refine_name(name, email, phone, linkedin, filename, lines, headers)
 
     def mask(text):
         for value in (email, phone, linkedin):
@@ -1879,10 +2338,12 @@ def parse_resume(path, mime_type):
     all_matched = matched_skills + matched_titles + matched_industries
     unmatched = build_unmatched_string(not_matched_skills, not_matched_titles, not_matched_industries, all_matched)
 
-    educations = extract_educations(sections)
+    educations = extract_educations(sections) or extract_educations_from_sentences(full_text)
     certifications = extract_certifications(sections)
-    return {
+    doc = {
+        "parser_version": PARSER_VERSION,
         "name": name,
+        "name_source": name_source,
         "email": email,
         "linkedin": linkedin,
         "phone": phone,
@@ -1904,278 +2365,846 @@ def parse_resume(path, mime_type):
         "internships": extract_internships(sections, matched_titles),
         "unmatched": unmatched,
     }
+    found = [s for s in CORE_SECTIONS if doc.get(s)]
+    doc["sections_found"] = found
+    doc["section_count"] = len(found)
+    doc["has_all_sections"] = len(found) == len(CORE_SECTIONS)
+    # Private helpers for check_if_real_resume (names starting with "_"). They are
+    # removed before anything is saved.
+    doc["_top_text"] = full_text[:1500]
+    doc["_text_length"] = len(full_text)
+    doc["_heading_count"] = len(headers)
+    doc["_resume_filename"] = bool(_RESUME_FILENAME.search(filename or ""))
+    return doc
 
 
-def _worker_task(path, filename, mime_type, doc_id):
-    try:
-        doc = parse_resume(path, mime_type)
-    except Exception as e:
-        return filename, {"id": doc_id, "error": str(e)}
-    doc["id"] = doc_id
-    return filename, doc
+# A name alone isn't proof: with no real name on the page the name finder can
+# settle on a phrase ("Java 8 Scenarios", "Total Positions"), so job
+# descriptions and study notes would slip in. A resume normally says how to
+# reach the candidate -- but job-site exports (Naukri, iimjobs) often hide the
+# contact details of a perfectly real resume. Those have many sections, while
+# a job description or study note has only a couple, so a document with no
+# contact details still counts once it has at least this many sections.
+MIN_SECTIONS_WITHOUT_CONTACT = 4
 
 
-# ============================ .doc conversion, hashing, MeiliSearch ============================
+# Signs that a document is a letter, certificate, statement or book page and not a resume.
+# A cover letter needs a greeting AND the body or the sign-off of a letter. One of these words alone
+# ("Subject:", "Thanking you", "Respected Sir") also appears in ordinary resumes.
+_LETTER_GREETING = re.compile(
+    r"\b(dear\s+(sir|madam|mam|ma'?am|hiring|team|recruiter|manager)|respected\s+(sir|madam|mam|ma'?am)|"
+    r"to\s*,?\s*\n\s*the\s+(hr|hiring|manager|human|recruit))", re.IGNORECASE)
+_LETTER_BODY = re.compile(
+    r"(\bi\s+am\s+(writing|applying)|\bi['\u2019]m\s+applying|\bi\s+(would\s+like|wish)\s+to\s+apply|"
+    r"\bapplication\s+for\s+the\s+(post|position)|\binterest\s+in\s+applying|\bplease\s+find\s+(my|the)\s+(attached\s+)?(resume|cv)|"
+    r"\benclosed\s+(is|my)|\bsub(ject)?\s*[:\-]+\s*.{0,60}applic|\bi\s+herewith|\bcover\s+letter\b)", re.IGNORECASE)
+_LETTER_SIGNOFF = re.compile(r"\b(yours\s+(faithfully|sincerely|truly)|sincerely\s*,)", re.IGNORECASE)
+# Papers that are plainly not resumes. Each pattern is specific: a word like "invoice" or "government of"
+# is also in real resumes (accounts executives, government jobs), so words alone never count.
+# A certificate announces itself in its first lines; deeper in the page "Certificate of Achievement" is
+# just an entry in somebody's certifications list.
+_CERTIFICATE_TITLE = re.compile(
+    r"(certificate\s+for\s+covid|covid-?19\s+vaccination|vaccination\s+certificate|this\s+is\s+to\s+certify|"
+    r"provisional\s+certificate|u[a-z]?yam\s+regist\w+|registration\s+certificate|"
+    r"certificate\s+of\s+(completion|participation|appreciation|achievement|business\s+excellence|merit))", re.IGNORECASE)
+_NOT_A_RESUME_SIGNS = re.compile(
+    r"(account\s+statement\s+as\s+of|account\s+holder'?s?\s+name|opening\s+balance|closing\s+balance|"
+    r"tax\s+invoice|invoice\s+(no|number|date)\b|\bgstin\s*:|\birn\s*:|e-?way\s+bill|\back\s+no\b|purchase\s+order|\bgstn\s*(no\.?)?\s*:|"
+    r"itemi[sz]ed\s+report|payment\s+(acknowledg\w+|receipt|successful)|transaction\s+(id|no)\b|"
+    r"premium\s+(receipt|payment)|billdesk|\bisbn\b|all\s+rights\s+reserved|table\s+of\s+contents)", re.IGNORECASE)
+_JOB_AD_SIGNS = re.compile(
+    r"(job\s+description|job\s+overview|job\s+title\s*:|about\s+(the\s+)?company|about\s+us\b|we\s+are\s+(looking|seeking|hiring)|"
+    r"position\s+title|desired\s+experience|key\s+skills\s+required|number\s+of\s+positions|screening\s+questions|"
+    r"walk-?in\s+interview|\bjd\b)", re.IGNORECASE)
+_RESUME_FILENAME = re.compile(r"resume|\bcv\b|curriculum|naukri|bio-?data|updazz", re.IGNORECASE)
+MAX_TEXT_LENGTH_WITHOUT_CONTACT = 25000   # a resume this long almost always has contact details
 
-def find_soffice():
-    for candidate in ("soffice", "soffice.exe"):
-        found = shutil.which(candidate)
-        if found:
-            return found
-    for candidate in (r"C:\Program Files\LibreOffice\program\soffice.exe",
-                      r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"):
-        if os.path.exists(candidate):
-            return candidate
+
+def validity_problem(doc):
+    """Why a file is not a usable resume, or None if it is. For the classification script a file is a
+    resume unless it is clearly something else: a certificate / invoice / statement, a
+    job description (a document with no contact details), or it has no readable text at all.
+    A cover letter counts as a resume.
+    There is NO requirement for a name, a section, contact details or a minimum number of sections."""
+    top_text = doc.get("_top_text", "")
+    if doc.get("_text_length", 0) < 20:
+        return "no readable text in the file (blank page, picture without text, or a scan that could not be read)"
+    if doc.get("section_count", 0) <= 3 and (
+            len({m.group(0).lower() for m in _NOT_A_RESUME_SIGNS.finditer(top_text[:600])}) >= 2
+            or _CERTIFICATE_TITLE.search(top_text[:300])):
+        return "looks like a certificate, statement or book page, not a resume"
+    has_any_contact = doc.get("email") or doc.get("phone") or doc.get("linkedin")
+    if not has_any_contact:
+        # "Position Title:" and "JOB DESCRIPTION" are also headings inside a resume's experience section, so
+        # one advert phrase counts only at the very top of the page; deeper down two different ones are needed
+        ad_phrases = {m.group(0).lower() for m in _JOB_AD_SIGNS.finditer(top_text)}
+        if _JOB_AD_SIGNS.search(top_text[:400]) or len(ad_phrases) >= 2:
+            return "looks like a job description, not a resume"
     return None
 
 
-def convert_doc_files_to_docx(doc_paths, tmp_dir):
-    converted = {}
-    if not doc_paths:
-        return converted
-    soffice = find_soffice()
-    if not soffice:
-        return converted
-    os.makedirs(tmp_dir, exist_ok=True)
-    tmp_dir = os.path.abspath(tmp_dir)
-    batch_size = 50
-    for i in range(0, len(doc_paths), batch_size):
-        batch = doc_paths[i:i + batch_size]
+# =====================================================================
+#                           THE SIMPLE PART
+#   Plain code: find the files, sort them, parse them, save the JSON.
+# =====================================================================
+
+SCRIPT_FOLDER = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_OUTPUT_FOLDER = os.path.join(SCRIPT_FOLDER, "output")
+DEFAULT_WORKERS = min(os.cpu_count() or 1, 4)   # reading resumes uses a lot of memory
+MAX_ZIP_LEVELS = 3                              # a zip inside a zip inside a zip
+
+
+# ---------- small helpers ----------
+
+def make_file_id(path_inside_input):
+    """A fingerprint of the file's path inside the input folder.
+    The same file always gets the same id. Two files with the same name in
+    different folders get different ids."""
+    return hashlib.md5(path_inside_input.encode("utf-8")).hexdigest()
+
+
+def folder_part(path_inside_input):
+    """'Java dev/cv.pdf' gives 'Java dev'. A file in the top folder gives ''."""
+    if "/" in path_inside_input:
+        return path_inside_input.rsplit("/", 1)[0]
+    return ""
+
+
+def name_part(path_inside_input):
+    """'Java dev/cv.pdf' gives 'cv.pdf'."""
+    return path_inside_input.rsplit("/", 1)[-1]
+
+
+def check_if_real_resume(resume):
+    """Returns None if this looks like a real resume, or a short reason if not.
+    A real resume has a name, at least one section, and a way to reach the person
+    (or, when the contact details are hidden, at least 4 sections)."""
+    return validity_problem(resume)
+
+
+def make_note(path_inside_input, **details):
+    """A short record about a file that did NOT become a resume (error, duplicate, ...)."""
+    note = {"id": make_file_id(path_inside_input)}
+    note.update(details)
+    folder = folder_part(path_inside_input)
+    if folder:
+        note["source_folder"] = folder
+    note["source_file"] = name_part(path_inside_input)
+    return note
+
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+
+
+# ---------- step 1: find every file ----------
+
+def find_all_files(input_folder, zip_temp_folder, skip_folders, open_zips):
+    """Finds every file in the input folder, subfolders included. A .zip file is
+    opened and its files are treated as if the zip were a folder.
+
+    Returns two things:
+      files        : a list of (path_inside_input, real_path_on_disk)
+      zip_problems : a list of (path_inside_input, reason) for zip files that would not open
+    """
+    folders_to_skip = {name.lower() for name in skip_folders}
+    files = []
+    zip_problems = []
+    unpacked_count = [0]   # numbers the files we unpack, so their names never clash
+
+    def open_zip(zip_path, zip_name_inside_input, level):
         try:
-            subprocess.run(
-                [soffice, "--headless", "--norestore", "--convert-to", "docx", "--outdir", tmp_dir]
-                + [os.path.abspath(p) for p in batch],
-                capture_output=True, timeout=60 * len(batch), check=False,
-            )
-        except Exception:
+            zip_file = zipfile.ZipFile(zip_path)
+        except (zipfile.BadZipFile, OSError) as problem:
+            zip_problems.append((zip_name_inside_input, f"could not open zip: {problem}"))
+            return
+        with zip_file:
+            for member in zip_file.infolist():
+                if member.is_dir():
+                    continue
+                parts = [p for p in member.filename.replace("\\", "/").split("/") if p not in ("", ".", "..")]
+                if not parts or any(p.lower() in folders_to_skip for p in parts[:-1]):
+                    continue
+                name_inside_input = zip_name_inside_input + "/" + "/".join(parts)
+                extension = os.path.splitext(parts[-1])[1].lower()
+                unpacked_count[0] += 1
+                saved_path = os.path.join(zip_temp_folder, f"{unpacked_count[0]:07d}{extension}")
+                try:
+                    with zip_file.open(member) as source, open(saved_path, "wb") as target:
+                        shutil.copyfileobj(source, target)
+                except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError) as problem:
+                    zip_problems.append((name_inside_input, f"could not extract from zip: {problem}"))
+                    continue
+                is_inner_zip = extension == ".zip" and level < MAX_ZIP_LEVELS and zipfile.is_zipfile(saved_path)
+                if open_zips and is_inner_zip:
+                    open_zip(saved_path, name_inside_input, level + 1)
+                else:
+                    files.append((name_inside_input, saved_path))
+
+    for folder, subfolders, file_names in os.walk(input_folder):
+        subfolders[:] = sorted(n for n in subfolders if n.lower() not in folders_to_skip)
+        folder_inside_input = os.path.relpath(folder, input_folder)
+        for file_name in sorted(file_names):
+            if folder_inside_input == ".":
+                path_inside_input = file_name
+            else:
+                path_inside_input = folder_inside_input.replace(os.sep, "/") + "/" + file_name
+            real_path = os.path.join(folder, file_name)
+            if open_zips and file_name.lower().endswith(".zip") and zipfile.is_zipfile(real_path):
+                open_zip(real_path, path_inside_input, 1)
+            else:
+                files.append((path_inside_input, real_path))
+    return files, zip_problems
+
+
+# ---------- step 2: sort the files into groups ----------
+
+def sort_files_into_groups(files):
+    """Looks at every file and decides what happens to it.
+
+    Returns four lists:
+      to_parse    : (path_inside_input, real_path, file_type)  files we will read
+      unsupported : notes for files that are not a resume file type
+      duplicates  : notes for files with the same content as an earlier file
+      errors      : notes for files we could not even open
+    """
+    to_parse, unsupported, duplicates, errors = [], [], [], []
+    first_file_with_content = {}   # content fingerprint -> path of the first file that had it
+    for path_inside_input, real_path in files:
+        file_type = detect_mime_type(real_path)
+        if file_type not in SUPPORTED_MIMES:
+            extension = os.path.splitext(path_inside_input)[1].lower() or "(no extension)"
+            unsupported.append(make_note(
+                path_inside_input, skipped=True,
+                message=(f"This file was not processed because its content (checked directly, not just its "
+                         f"'{extension}' extension) isn't a recognized resume format. "
+                         "Supported: PDF, DOCX, DOC, RTF, ODT, and image files.")))
             continue
-        for doc_path in batch:
-            docx_path = os.path.join(tmp_dir, os.path.splitext(os.path.basename(doc_path))[0] + ".docx")
-            if os.path.exists(docx_path):
-                converted[doc_path] = docx_path
+        try:
+            with open(real_path, "rb") as file:
+                content_fingerprint = hashlib.sha256(file.read()).hexdigest()
+        except OSError as problem:
+            errors.append(make_note(path_inside_input, error=f"could not read file: {problem}"))
+            continue
+        first_path = first_file_with_content.get(content_fingerprint)
+        if first_path is not None:
+            duplicates.append(make_note(
+                path_inside_input, duplicate_of=first_path,
+                message=f"The file is a duplicate of the {first_path} file."))
+            continue
+        first_file_with_content[content_fingerprint] = path_inside_input
+        to_parse.append((path_inside_input, real_path, file_type))
+    return to_parse, unsupported, duplicates, errors
+
+
+# ---------- step 3: turn old formats into .docx ----------
+
+def find_libreoffice():
+    for name in ("soffice", "soffice.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for path in (r"C:\Program Files\LibreOffice\program\soffice.exe",
+                 r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def convert_old_formats(paths, temp_folder):
+    """Turns .doc / .rtf / .odt files into .docx with LibreOffice.
+    Returns {original_path: new_docx_path} for every file that worked."""
+    converted = {}
+    libreoffice = find_libreoffice()
+    if not paths or not libreoffice:
+        return converted
+    temp_folder = os.path.abspath(temp_folder)
+    os.makedirs(temp_folder, exist_ok=True)
+
+    # Work on numbered copies so two files with the same name can never overwrite each other.
+    copies = {}   # original path -> (copy to convert, the .docx we expect to appear, is it a web page?)
+    for number, path in enumerate(paths):
+        extension = os.path.splitext(path)[1].lower() or ".bin"
+        is_web_page = detect_mime_type(path) == HTML_MIME
+        if is_web_page:
+            extension = ".html"   # LibreOffice must see .html, even if the file is called .doc
+        copy_path = os.path.join(temp_folder, f"{number:07d}{extension}")
+        try:
+            shutil.copy2(path, copy_path)
+        except OSError:
+            continue
+        copies[path] = (copy_path, os.path.join(temp_folder, f"{number:07d}.docx"), is_web_page)
+
+    def run_libreoffice(files_to_convert, seconds, web_pages):
+        # Web pages only convert to .docx when opened as a Writer document.
+        settings = ["--infilter=HTML (StarWriter)", "--convert-to", "docx:MS Word 2007 XML"] if web_pages \
+            else ["--convert-to", "docx"]
+        try:
+            subprocess.run([libreoffice, "--headless", "--norestore"] + settings +
+                           ["--outdir", temp_folder] + files_to_convert,
+                           capture_output=True, timeout=seconds, check=False)
+        except Exception:
+            pass
+
+    originals = list(copies)
+    for web_pages in (False, True):                       # ordinary files first, then web pages
+        group_of_this_kind = [path for path in originals if copies[path][2] == web_pages]
+        for start in range(0, len(group_of_this_kind), 50):    # 50 files at a time
+            group = group_of_this_kind[start:start + 50]
+            run_libreoffice([copies[path][0] for path in group], 60 * len(group), web_pages)
+    for path in originals:
+        copy_path, docx_path, is_web_page = copies[path]
+        if not os.path.exists(docx_path):
+            run_libreoffice([copy_path], 120, is_web_page)    # one more try, on its own
+        if os.path.exists(docx_path):
+            converted[path] = docx_path
     return converted
 
 
-def make_doc_id(filename):
-    return hashlib.md5(filename.encode("utf-8")).hexdigest()
+# ---------- step 4: read the files ----------
 
-
-def _load_hash_index(hash_dir):
-    path = os.path.join(hash_dir, "seen_hashes.json")
-    if not os.path.exists(path):
-        return {}
+def parse_one_file(task):
+    """Runs inside a worker process. Reads one file.
+    task = (path_to_read, path_inside_input, file_type, file_id)
+    Returns (kind, data) where kind is 'real', 'invalid' or 'error'."""
+    path_to_read, path_inside_input, file_type, file_id = task
+    folder = folder_part(path_inside_input)
+    file_name = name_part(path_inside_input)
     try:
-        import json
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_hash_index(hash_dir, seen_hashes):
-    import json
-    os.makedirs(hash_dir, exist_ok=True)
-    with open(os.path.join(hash_dir, "seen_hashes.json"), "w") as f:
-        json.dump(seen_hashes, f, indent=2)
-
-
-def fetch_existing_ids(index):
-    existing = set()
-    offset, limit = 0, 10000
-    while True:
-        try:
-            batch = index.get_documents({"offset": offset, "limit": limit, "fields": ["id"]}).results
-        except MeilisearchApiError as e:
-            if e.code == "index_not_found":  # first run: add_documents creates it later
-                return existing
-            raise
-        if not batch:
-            break
-        existing.update(d.id for d in batch)
-        offset += limit
-    return existing
-
-
-def is_note(doc):
-    """Bookkeeping documents (duplicate / unsupported / error), not resumes."""
-    return "error" in doc or "duplicate_of" in doc or bool(doc.get("skipped"))
-
-
-def ensure_filterable_attributes(client, index, wanted):
-    """Adds any missing `wanted` attributes without dropping ones already set
-    (by an earlier run, or by hand), so a re-run never undoes settings."""
-    try:
-        current = index.get_filterable_attributes() or []
-    except MeilisearchApiError as e:
-        if e.code != "index_not_found":
-            raise
-        current = []
-    current_names = {a for a in current if isinstance(a, str)}
-    missing = [a for a in wanted if a not in current_names]
-    if missing:
-        task = index.update_filterable_attributes(list(current) + missing)
-        client.wait_for_task(task.task_uid, timeout_in_ms=300_000)
-
-
-# ================================ Driver ================================
-
-def main(folder_name, workers, lookups_dir, hash_dir, meili_url, meili_index, meili_api_key,
-         notes_index_name=None):
-    client = meilisearch.Client(meili_url, meili_api_key)
-    index = client.index(meili_index)
-    notes_index_name = notes_index_name or meili_index + NOTES_INDEX_SUFFIX
-    notes_index = client.index(notes_index_name)
-    try:
-        existing_ids = fetch_existing_ids(index) | fetch_existing_ids(notes_index)
-    except Exception as e:
-        print(f"Could not reach MeiliSearch at {meili_url} ({e}). Is the server running?")
-        return
-    print(f"{len(existing_ids)} documents already in '{meili_index}' + '{notes_index_name}'.")
-
-    all_files = sorted(os.listdir(folder_name))
-    mime_by_file = {}
-    for f in all_files:
-        path = os.path.join(folder_name, f)
-        if not os.path.isfile(path):
-            continue
-        mime_type = detect_mime_type(path)
-        if mime_type in SUPPORTED_MIMES:
-            mime_by_file[f] = mime_type
-    resume_files = [f for f in all_files if f in mime_by_file]
-    unsupported_files = [f for f in all_files if f not in mime_by_file]
-
-    documents = []
-    for f in unsupported_files:
-        doc_id = make_doc_id(f)
-        if doc_id in existing_ids:
-            continue
-        ext = os.path.splitext(f)[1].lower() or "(no extension)"
-        documents.append({
-            "id": doc_id, "skipped": True,
-            "message": (
-                f"This file was not processed because its content (checked directly, "
-                f"not just its '{ext}' extension) isn't a recognized resume format. "
-                "Supported: PDF, DOCX, DOC, and image files."
-            ),
-        })
-
-    seen_hashes = _load_hash_index(hash_dir)
-    todo, already_done, skipped_duplicates, unreadable = [], 0, 0, 0
-    for f in resume_files:
-        doc_id = make_doc_id(f)
-        if doc_id in existing_ids:
-            already_done += 1
-            continue
-        try:
-            with open(os.path.join(folder_name, f), "rb") as fh:
-                content_hash = hashlib.sha256(fh.read()).hexdigest()
-        except OSError as e:
-            documents.append({"id": doc_id, "error": f"could not read file: {e}"})
-            unreadable += 1
-            continue
-        original = seen_hashes.get(content_hash)
-        if original is not None and original != f:
-            documents.append({
-                "id": doc_id, "duplicate_of": original,
-                "message": f"The file is a duplicate of the {original} file.",
-            })
-            skipped_duplicates += 1
-            continue
-        seen_hashes[content_hash] = f
-        todo.append(f)
-    _save_hash_index(hash_dir, seen_hashes)
-
-    print(f"{len(todo)} to process, {already_done} already in the index, "
-          f"{skipped_duplicates} duplicate content, {len(unsupported_files)} unsupported, "
-          f"{unreadable} unreadable")
-
-    doc_files = [f for f in todo if mime_by_file[f] == DOC_MIME]
-    doc_tmp_dir = tempfile.mkdtemp(prefix="structured_doc_to_docx_")
-    doc_to_docx = convert_doc_files_to_docx([os.path.join(folder_name, f) for f in doc_files], doc_tmp_dir)
-    if doc_files:
-        print(f".doc: {len(doc_to_docx)}/{len(doc_files)} converted to .docx")
-
-    tasks = []
-    for f in todo:
-        mime_type = mime_by_file[f]
-        if mime_type == DOC_MIME:
-            path = doc_to_docx.get(os.path.join(folder_name, f))
-            if path is None:
-                documents.append({
-                    "id": make_doc_id(f),
-                    "error": "could not convert .doc to .docx (LibreOffice missing or conversion failed)",
-                })
-                continue
-            mime_type = DOCX_MIME
+        resume = parse_resume(path_to_read, file_type, file_name)
+        problem = check_if_real_resume(resume)
+        if problem:
+            kind = "invalid"
+            data = {"invalid_resume": True, "reason": problem}
+            for key in ("name", "email", "phone"):
+                if resume.get(key):
+                    data[key] = resume[key]
         else:
-            path = os.path.join(folder_name, f)
-        tasks.append((path, f, mime_type, make_doc_id(f)))
+            kind = "real"
+            data = {key: value for key, value in resume.items() if not key.startswith("_")}
+    except Exception as problem:
+        kind = "error"
+        data = {"error": str(problem)}
+    data["id"] = file_id
+    if folder:
+        data["source_folder"] = folder
+    if kind != "real":
+        data["source_file"] = file_name
+    return kind, data
 
-    errors = 0
-    start = time.time()
-    with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker, initargs=(lookups_dir,)) as pool:
-        futures = [pool.submit(_worker_task, path, filename, mime_type, doc_id) for path, filename, mime_type, doc_id in tasks]
-        for i, future in enumerate(as_completed(futures), 1):
-            try:
-                filename, doc = future.result()
-            except BrokenProcessPool as e:
-                print(f"  a worker process crashed ({e}) -- stopping early.")
-                break
-            if "error" in doc:
-                errors += 1
-            documents.append(doc)
-            if i % 200 == 0 or i == len(tasks):
-                elapsed = time.time() - start
-                print(f"  {i}/{len(tasks)} ({(i / elapsed if elapsed else 0):.1f}/s, {errors} errors so far)")
 
-    shutil.rmtree(doc_tmp_dir, ignore_errors=True)
+def parse_all_files(tasks, workers, lookups_folder, on_result):
+    """Reads every task with several worker processes. Each time a file is done,
+    on_result(kind, data) is called.
 
-    if not documents:
-        print("Nothing new to upload.")
-        return
+    If a worker process crashes (usually out of memory) we start again with half
+    as many workers, only for the files that were not finished. When only one
+    worker is left and it still crashes, that one file is recorded as an error
+    and we carry on with the rest."""
+    waiting = list(tasks)
+    done_count = 0
+    start_time = time.time()
+    while waiting:
+        finished_ids = set()
+        crashed = False
+        try:
+            with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker,
+                                     initargs=(lookups_folder,)) as pool:
+                futures = [pool.submit(parse_one_file, task) for task in waiting]
+                for future in as_completed(futures):
+                    try:
+                        kind, data = future.result()
+                    except BrokenProcessPool:
+                        crashed = True
+                        break
+                    finished_ids.add(data["id"])
+                    on_result(kind, data)
+                    done_count += 1
+                    if done_count % 200 == 0 or done_count == len(tasks):
+                        speed = done_count / max(time.time() - start_time, 0.001)
+                        print(f"  {done_count}/{len(tasks)} files read ({speed:.1f} per second)")
+        except BrokenProcessPool:
+            crashed = True
+        waiting = [task for task in waiting if task[3] not in finished_ids]
+        if not crashed:
+            break
+        if workers > 1:
+            workers = max(1, workers // 2)
+            print(f"  a worker crashed - trying the {len(waiting)} unfinished files again with {workers} worker(s)")
+        elif waiting:
+            bad_task = waiting.pop(0)
+            print(f"  a worker crashed on {name_part(bad_task[1])} - saving it as an error and carrying on")
+            on_result("error", make_note(bad_task[1],
+                                         error="the parser process crashed on this file (likely out of memory)"))
+            done_count += 1
 
-    resumes = [d for d in documents if not is_note(d)]
-    notes = [d for d in documents if is_note(d)]
-    if resumes:
-        ensure_filterable_attributes(client, index, RESUME_FILTERABLE_ATTRIBUTES)
-    batch_size = 500
-    for target, name, docs in ((index, meili_index, resumes), (notes_index, notes_index_name, notes)):
-        for i in range(0, len(docs), batch_size):
-            batch = docs[i:i + batch_size]
-            task = target.add_documents(batch, primary_key="id")
-            client.wait_for_task(task.task_uid, timeout_in_ms=120_000)
-            print(f"  uploaded {min(i + batch_size, len(docs))}/{len(docs)} to '{name}'")
 
-    elapsed = time.time() - start
+# ---------- a short list of resumes worth a human look ----------
+
+# ---------- candidate lists (CSV files): one resume record per row ----------
+
+_CSV_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}")
+
+
+def read_csv_rows(path):
+    """(header in lower case, rows) of a CSV or TSV candidate list. A tab-separated header wrapped in
+    quotes inside a comma file is split back into its columns."""
+    import io
+    csv.field_size_limit(10_000_000)
+    raw = open(path, "rb").read()
     try:
-        total = index.get_stats().number_of_documents
-    except MeilisearchApiError:
-        total = 0
-    print(f"Total: {len(resumes)} resumes -> '{meili_index}' ({total} there now), "
-          f"{len(notes)} notes -> '{notes_index_name}', in {elapsed / 60:.1f} min, "
-          f"{errors + unreadable} error(s)")
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    delimiter = "\t" if text[:400].count("\t") > text[:400].count(",") else ","
+    rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    if rows and len(rows[0]) <= 2 and "\t" in rows[0][0]:
+        rows = [r[0].split("\t") if r and "\t" in r[0] else r for r in rows]
+    if not rows:
+        return [], []
+    return [c.strip().lower() for c in rows[0]], rows[1:]
+
+
+def _csv_text(value):
+    value = (value or "").replace("\t", " ").strip()
+    return "" if value in ("-", "--", "nan", "None", "null", "NULL") else re.sub(r"\s{2,}", " ", value)
+
+
+def _csv_items(text, limit=40):
+    items = []
+    for part in re.split(r"\s*[,;|]\s*", text or ""):
+        part = re.sub(r"^(knows|know)\s+", "", part.strip(), flags=re.IGNORECASE).strip(" .>")
+        if 2 <= len(part) <= 60 and re.search(r"[A-Za-z]{2}", part) and part.lower() not in {x.lower() for x in items}:
+            items.append(part)
+    return items[:limit]
+
+
+def csv_row_to_doc(header, row, folder, file_name):
+    """One candidate row -> a resume record with the same fields as a resume read from a file, or
+    (None, reason) when the row is not usable (no name, no contact details, nothing to search on)."""
+    def get(*names):
+        for n in names:
+            if n in header and header.index(n) < len(row):
+                v = _csv_text(row[header.index(n)])
+                if v:
+                    return v
+        return ""
+
+    name = re.sub(r"\s{2,}", " ", get("name", "full name")).strip(" .-")
+    if len(re.sub(r"[^A-Za-z]", "", name)) < 2:
+        return None, "no name in the row"
+    email = next(iter(_CSV_EMAIL.findall(get("email"))), None)
+    phone_text = get("phone", "mobile no.", "phone number")
+    phone = find_phone(phone_text) or (re.sub(r"\D", "", phone_text) if len(re.sub(r"\D", "", phone_text)) >= 10 else None)
+    linkedin_text = get("linkedin", "linkedin url")
+    linkedin = None
+    m = re.search(r"linkedin\.com/in/[\w%-]+", linkedin_text, re.IGNORECASE)
+    if m:
+        linkedin = m.group(0).lower() if len(m.group(0)) < 200 else m.group(0)
+    if not (email or phone or linkedin):
+        return None, "no email, phone or LinkedIn in the row"
+
+    skill_items = _csv_items(get("skills"))
+    skills = _filter_junk_terms(_strip_languages(collect_skills("\n".join(skill_items), "", []), _languages_matcher)) \
+        if skill_items else []
+    for item in skill_items:      # keep what the row says even if the skill list does not know it
+        if len(item.split()) <= 4 and item.lower() not in {x.lower() for x in skills}:
+            skills.append(item)
+    titles = []
+    for value in (get("designation"), get("previous designation"), get("current title")):
+        for part in re.split(r"\s*\|\s*", value):
+            part = part.strip()
+            if 2 <= len(part) <= 80 and part.lower() not in {x.lower() for x in titles}:
+                titles.append(part)
+    company = " ".join(x for x in (get("company"), get("previous company name"), get("current company")) if x)
+    industries = find_industries(" ".join([company, " ".join(titles), " ".join(skill_items)]), "")
+    languages = match_languages(get("languages known"), _languages_matcher) if get("languages known") else []
+
+    degree = get("degrees")
+    colleges = get("colleges")
+    course = get("course")
+    specialization = get("specialization")
+    college = get("college name")
+    educations = []
+    if degree or colleges:
+        educations.append(", ".join(x for x in (degree, colleges) if x))
+    if course or college:
+        educations.append(", ".join(x for x in (f"{course} ({specialization})" if course and specialization else course, college) if x))
+    if not educations and get("qualification"):
+        educations.append(get("qualification"))
+
+    doc = {
+        "parser_version": PARSER_VERSION,
+        "name": name,
+        "name_source": "csv",
+        "email": email,
+        "linkedin": linkedin,
+        "phone": phone,
+        "skills": as_csv(skills),
+        "titles": as_csv(titles),
+        "industries": as_csv(industries),
+        "languages": as_csv(languages),
+        "skills_list": skills,
+        "titles_list": titles,
+        "industries_list": industries,
+        "languages_list": languages,
+        "educations": "; ".join(educations),
+        "certifications": "",
+        "educations_list": educations,
+        "certifications_list": [],
+        "projects": [],
+        "internships": [],
+        "unmatched": "",
+        "source_type": "csv_candidate_list",
+        "experience": get("experience", "relevant experience", "years of experience", "level of experience"),
+        "location": get("location", "city"),
+    }
+    _count_sections(doc)
+    if not doc["section_count"]:
+        return None, "nothing to search on (no skills, titles, industries or education)"
+    if folder:
+        doc["source_folder"] = folder
+    return doc, None
+
+
+def _count_sections(doc):
+    found = [section for section in CORE_SECTIONS if doc.get(section)]
+    doc["sections_found"] = found
+    doc["section_count"] = len(found)
+    doc["has_all_sections"] = len(found) == len(CORE_SECTIONS)
+
+
+def _csv_person_id(doc):
+    key = (doc.get("email") or "").lower() or re.sub(r"\D", "", doc.get("phone") or "")[-10:] or (doc.get("linkedin") or "")
+    return hashlib.md5(("csv:" + key).encode("utf-8")).hexdigest()
+
+
+def _merge_csv_docs(first, other):
+    """The same person in several files (or rows): keep one record with everything known about them."""
+    for key in ("email", "phone", "linkedin", "experience", "location", "source_folder"):
+        if not first.get(key) and other.get(key):
+            first[key] = other[key]
+    for key in ("skills_list", "titles_list", "industries_list", "languages_list", "educations_list"):
+        seen = {x.lower() for x in first.get(key, [])}
+        first[key] = first.get(key, []) + [x for x in other.get(key, []) if x.lower() not in seen]
+    first["skills"], first["titles"] = as_csv(first["skills_list"]), as_csv(first["titles_list"])
+    first["industries"], first["languages"] = as_csv(first["industries_list"]), as_csv(first["languages_list"])
+    first["educations"] = "; ".join(first["educations_list"])
+    _count_sections(first)
+
+
+def read_candidate_csvs(csv_jobs):
+    """Reads every candidate-list CSV. Returns ({person id: record}, [rows that were not usable])."""
+    people, invalid = {}, []
+    for path_inside_input, real_path, _, file_id in csv_jobs:
+        folder, file_name = folder_part(path_inside_input), name_part(path_inside_input)
+        try:
+            header, rows = read_csv_rows(real_path)
+        except Exception as problem:
+            invalid.append({"id": file_id, "source_file": file_name, "reason": f"could not read the CSV: {problem}"})
+            continue
+        for number, row in enumerate(rows, start=2):
+            doc, reason = csv_row_to_doc(header, row, folder, file_name)
+            if doc is None:
+                invalid.append({"id": hashlib.md5(f"{path_inside_input}#{number}".encode()).hexdigest(),
+                                "source_file": file_name, "source_folder": folder, "row": number, "reason": reason})
+                continue
+            doc["id"] = _csv_person_id(doc)
+            if doc["id"] in people:
+                _merge_csv_docs(people[doc["id"]], doc)
+            else:
+                people[doc["id"]] = doc
+    return people, invalid
+
+
+def find_doubtful_resumes(real_folder, path_of):
+    """Goes through the saved real resumes and lists the ones that deserve a quick
+    human check, with the reasons. Nothing is changed or removed: it is only a list."""
+    doubtful = []
+    for file_name in sorted(os.listdir(real_folder)):
+        if not file_name.endswith(".json"):
+            continue
+        with open(os.path.join(real_folder, file_name), encoding="utf-8") as file:
+            resume = json.load(file)
+        if resume.get("source_type") == "csv_candidate_list":
+            continue
+        reasons = []
+        name = resume.get("name") or ""
+        if resume.get("name_source") in ("filename", "email"):
+            reasons.append("the name was rebuilt from the file name or the email, not read from the page")
+        if len(name.split()) == 1:
+            reasons.append("the name is a single word (first name or surname only?)")
+        if any(character.isdigit() for character in name):
+            reasons.append("the name contains digits")
+        if not resume.get("email") and not resume.get("phone"):
+            reasons.append("no email and no phone number")
+        if resume.get("section_count", 0) <= 2:
+            reasons.append("only one or two sections were found")
+        if reasons:
+            doubtful.append({"id": resume["id"], "file": path_of.get(resume["id"], ""),
+                             "name": name, "reasons": reasons})
+    return doubtful
+
+
+# ---------- files saved inside a web-upload body ----------
+
+_WRAPPED_START = (b"------WebKit", b"x\x9c", b"x\x01", b"x\xda")
+_EXTENSION_OF = {PDF_MIME: ".pdf", DOCX_MIME: ".docx", DOC_MIME: ".doc", RTF_MIME: ".rtf", ODT_MIME: ".odt",
+                 HTML_MIME: ".html", "image/jpeg": ".jpg", "image/png": ".png"}
+
+
+def _unwrapped_content(data):
+    """The real file hidden inside a saved browser upload ('------WebKitFormBoundary...' around a PDF or
+    DOCX) or inside a zlib stream. None if the data is neither."""
+    if data.startswith(b"------WebKit"):
+        start = data.find(b"\r\n\r\n")
+        if start < 0:
+            return None
+        boundary = data.split(b"\r\n", 1)[0]
+        body = data[start + 4:]
+        end = body.rfind(b"\r\n" + boundary)
+        return body[:end] if end > 0 else body
+    try:
+        return zlib.decompress(data)
+    except zlib.error:
+        return None
+
+
+def unwrap_uploaded_files(files, temp_folder):
+    """Replaces every file that is really a wrapped PDF/DOCX/... by a copy of the real file, so it is read
+    like any other resume. Files that are not wrapped, or whose content is not a supported type once
+    unwrapped, are left exactly as they were."""
+    out, count = [], 0
+    for path_inside_input, real_path in files:
+        try:
+            with open(real_path, "rb") as file:
+                if not file.read(12).startswith(_WRAPPED_START):
+                    out.append((path_inside_input, real_path))
+                    continue
+            with open(real_path, "rb") as file:
+                inner = _unwrapped_content(file.read())
+        except OSError:
+            out.append((path_inside_input, real_path))
+            continue
+        new_path = None
+        if inner:
+            count += 1
+            probe = os.path.join(temp_folder, f"unwrapped_{count:06d}.bin")
+            with open(probe, "wb") as file:
+                file.write(inner)
+            kind = detect_mime_type(probe)
+            if kind in SUPPORTED_MIMES:
+                new_path = probe[:-4] + _EXTENSION_OF.get(kind, ".bin")
+                os.replace(probe, new_path)
+            else:
+                os.remove(probe)
+        out.append((path_inside_input, new_path or real_path))
+    unwrapped = sum(1 for (_, a), (_, b) in zip(out, files) if a != b)
+    if unwrapped:
+        print(f"Unwrapped {unwrapped} files that were saved inside a web-upload body.")
+    return out
+
+
+# ---------- the whole run ----------
+
+def run(input_folder, name, output_folder, lookups_folder, workers, skip_folders, open_zips, redo, read_csv=True):
+    if not os.path.isdir(input_folder):
+        print(f"Input folder not found: {input_folder}")
+        return
+    run_folder = os.path.join(output_folder, name)
+    real_folder = os.path.join(run_folder, "real_resumes")
+    rejected_folder = os.path.join(run_folder, "rejected")
+    os.makedirs(real_folder, exist_ok=True)
+    os.makedirs(rejected_folder, exist_ok=True)
+
+    zip_temp_folder = tempfile.mkdtemp(prefix="resume_zip_")
+    convert_temp_folder = tempfile.mkdtemp(prefix="resume_convert_")
+    try:
+        # 1. find the files
+        files, zip_problems = find_all_files(input_folder, zip_temp_folder, skip_folders, open_zips)
+        files = unwrap_uploaded_files(files, zip_temp_folder)
+        print(f"Found {len(files)} files.")
+
+        # 2. sort them into groups
+        to_parse, unsupported, duplicates, errors = sort_files_into_groups(files)
+        for path_inside_input, reason in zip_problems:
+            errors.append(make_note(path_inside_input, error=reason))
+        invalid = []
+        result_of = {}   # file id -> what happened: real / invalid / error / duplicate / unsupported
+        for note in unsupported:
+            result_of[note["id"]] = "unsupported"
+        for note in duplicates:
+            result_of[note["id"]] = "duplicate"
+        for note in errors:
+            result_of[note["id"]] = "error"
+
+        # 3. skip resumes that are already saved, and convert old formats for the rest
+        still_to_do = []
+        already_saved = 0
+        for path_inside_input, real_path, file_type in to_parse:
+            file_id = make_file_id(path_inside_input)
+            if os.path.exists(os.path.join(real_folder, file_id + ".json")) and not redo:
+                already_saved += 1
+                result_of[file_id] = "real"
+            else:
+                still_to_do.append((path_inside_input, real_path, file_type, file_id))
+        print(f"{len(still_to_do)} files to read, {already_saved} already saved, "
+              f"{len(unsupported)} unsupported, {len(duplicates)} duplicates.")
+
+        csv_jobs = [job for job in still_to_do if job[2] == CSV_MIME]
+        still_to_do = [job for job in still_to_do if job[2] != CSV_MIME]
+        if csv_jobs and not read_csv:
+            for path_inside_input, _, _, file_id in csv_jobs:
+                unsupported.append(make_note(path_inside_input, skipped=True,
+                                             message="A candidate-list CSV file. Not read because --no-csv was given."))
+                result_of[file_id] = "unsupported"
+            csv_jobs = []
+        if csv_jobs:
+            print(f"{len(csv_jobs)} candidate-list CSV files will be read row by row.")
+
+        old_format_paths = [real_path for _, real_path, file_type, _ in still_to_do if file_type in CONVERT_MIMES]
+        converted = convert_old_formats(old_format_paths, convert_temp_folder)
+        if old_format_paths:
+            print(f"Old formats (.doc/.rtf/.odt): {len(converted)} of {len(old_format_paths)} converted to .docx.")
+
+        tasks = []
+        for path_inside_input, real_path, file_type, file_id in still_to_do:
+            path_to_read = real_path
+            if file_type in CONVERT_MIMES:
+                path_to_read = converted.get(real_path)
+                if path_to_read is None:
+                    errors.append(make_note(path_inside_input,
+                                            error="could not convert to .docx (LibreOffice missing or conversion failed)"))
+                    result_of[file_id] = "error"
+                    continue
+                file_type = DOCX_MIME
+            tasks.append((path_to_read, path_inside_input, file_type, file_id))
+
+        # 4. read the files; every real resume is saved the moment it is done
+        saved_now = 0
+
+        def when_a_file_is_done(kind, data):
+            nonlocal saved_now
+            file_id = data["id"]
+            result_of[file_id] = kind
+            if kind == "real":
+                save_json(os.path.join(real_folder, file_id + ".json"), data)
+                saved_now += 1
+            elif kind == "invalid":
+                invalid.append(data)
+            else:
+                errors.append(data)
+
+        if tasks:
+            parse_all_files(tasks, workers, lookups_folder, when_a_file_is_done)
+
+        # 4b. candidate-list CSV files: one record per person. A person who already has a resume FILE in this
+        #     run is skipped (the file is richer); the same person in several CSV files becomes one record.
+        csv_saved = csv_skipped = 0
+        csv_invalid = []
+        if csv_jobs:
+            _init_worker(lookups_folder)
+            people, csv_invalid = read_candidate_csvs(csv_jobs)
+            have_file = set()
+            for file_name in os.listdir(real_folder):
+                if file_name.endswith(".json"):
+                    with open(os.path.join(real_folder, file_name), encoding="utf-8") as handle:
+                        other = json.load(handle)
+                    if other.get("source_type") != "csv_candidate_list":
+                        if other.get("email"):
+                            have_file.add(other["email"].lower())
+                        if other.get("phone"):
+                            have_file.add(re.sub(r"\D", "", other["phone"])[-10:])
+            skipped_people = []
+            for person_id, doc in people.items():
+                phone_digits = re.sub(r"\D", "", doc.get("phone") or "")[-10:]
+                if (doc.get("email") or "").lower() in have_file or (len(phone_digits) >= 10 and phone_digits in have_file):
+                    csv_skipped += 1
+                    skipped_people.append({"id": person_id, "name": doc["name"], "email": doc.get("email"),
+                                           "reason": "this person already has a resume file"})
+                    continue
+                save_json(os.path.join(real_folder, person_id + ".json"), doc)
+                csv_saved += 1
+            save_json(os.path.join(rejected_folder, "csv_skipped_already_have_resume.json"), skipped_people)
+            save_json(os.path.join(rejected_folder, "csv_invalid_rows.json"), csv_invalid)
+            for _, _, _, file_id in csv_jobs:
+                result_of[file_id] = "csv"
+
+        # 5. save the rejected files (these are NOT resumes and are never uploaded)
+        save_json(os.path.join(rejected_folder, "errors.json"), errors)
+        save_json(os.path.join(rejected_folder, "invalid.json"), invalid)
+        save_json(os.path.join(rejected_folder, "unsupported.json"), unsupported)
+        save_json(os.path.join(rejected_folder, "duplicates.json"), duplicates)
+
+        # a file that used to be a resume but is rejected now must not stay in real_resumes
+        for note in errors + invalid + unsupported + duplicates:
+            old_json = os.path.join(real_folder, note["id"] + ".json")
+            if os.path.exists(old_json):
+                os.remove(old_json)
+
+        # 6. a list of every file and what happened to it
+        path_of = {make_file_id(path): path for path, _ in files}
+        for path, _ in zip_problems:
+            path_of[make_file_id(path)] = path
+        with open(os.path.join(run_folder, "file_list.csv"), "w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.writer(file, quoting=csv.QUOTE_ALL)
+            writer.writerow(["id", "file", "result"])
+            for file_id, path in path_of.items():
+                writer.writerow([file_id, path, result_of.get(file_id, "")])
+
+        # 7. a short list of real resumes that deserve a human look (nothing is removed)
+        review_folder = os.path.join(run_folder, "review")
+        os.makedirs(review_folder, exist_ok=True)
+        doubtful = find_doubtful_resumes(real_folder, path_of)
+        save_json(os.path.join(review_folder, "needs_review.json"), doubtful)
+    finally:
+        shutil.rmtree(zip_temp_folder, ignore_errors=True)
+        shutil.rmtree(convert_temp_folder, ignore_errors=True)
+
+    real_total = sum(1 for result in result_of.values() if result == "real") + csv_saved
+    print()
+    print(f"DONE. Results are in: {run_folder}")
+    print(f"  real resumes     : {real_total}  ({saved_now} new, {already_saved} already saved)  -> real_resumes/")
+    print(f"  invalid          : {len(invalid)}  -> rejected/invalid.json")
+    print(f"  errors           : {len(errors)}  -> rejected/errors.json")
+    print(f"  unsupported      : {len(unsupported)}  -> rejected/unsupported.json")
+    print(f"  duplicates       : {len(duplicates)}  -> rejected/duplicates.json")
+    print(f"  worth a look     : {len(doubtful)} of the real resumes  -> review/needs_review.json")
+    if csv_jobs:
+        print(f"  from CSV lists   : {csv_saved} people saved in real_resumes/ (included in the real resumes total), "
+              f"{csv_skipped} skipped because they already have a resume file, {len(csv_invalid)} unusable rows "
+              f"-> rejected/csv_invalid_rows.json")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Part 1 of 2: read resumes and save them as JSON files. Never touches MeiliSearch.")
+    parser.add_argument("input_folder",
+                        help="folder with the resumes (subfolders and .zip files are read too)")
+    parser.add_argument("--name", default=None,
+                        help="name of this batch; results go to output/<name>/ (default: the input folder's name)")
+    parser.add_argument("--output-folder", default=DEFAULT_OUTPUT_FOLDER,
+                        help="where the results are saved (default: the 'output' folder next to this script)")
+    parser.add_argument("--lookups-folder", default=DEFAULT_LOOKUPS_DIR,
+                        help="folder with skills.json, titles.json, industries.json, languages.json ... (default: lookups)")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                        help=f"how many files to read at once (default: {DEFAULT_WORKERS})")
+    parser.add_argument("--skip-folder", action="append", default=[], metavar="NAME",
+                        help="ignore every folder with this name (can be used several times). "
+                             "Nothing is skipped unless you ask.")
+    parser.add_argument("--no-zips", action="store_true",
+                        help="do not open .zip files (they are then counted as unsupported)")
+    parser.add_argument("--redo", action="store_true",
+                        help="read every file again, even if its JSON is already saved")
+    parser.add_argument("--no-csv", action="store_true",
+                        help="do not read candidate-list CSV files (they are then counted as unsupported). "
+                             "By default each row of a candidate list becomes one resume record.")
+    args = parser.parse_args()
+    name = args.name or os.path.basename(os.path.normpath(args.input_folder))
+    run(args.input_folder, name, args.output_folder, args.lookups_folder, args.workers,
+        args.skip_folder, not args.no_zips, args.redo, not args.no_csv)
 
 
 if __name__ == "__main__":
-    arg_parser = argparse.ArgumentParser(description="Parse resumes into MeiliSearch (the one script for this project).")
-    arg_parser.add_argument("folder_name", nargs="?", default=DEFAULT_INPUT_DIR,
-                             help=f"Folder of resumes to parse (default: {DEFAULT_INPUT_DIR})")
-    arg_parser.add_argument("--workers", type=int, default=os.cpu_count(),
-                             help="Worker processes (default: CPU core count)")
-    arg_parser.add_argument("--lookups-dir", default=DEFAULT_LOOKUPS_DIR,
-                             help=f"Folder containing skills.json/titles.json/industries.json/languages.json/"
-                                  f"normalized_category_mapping.json (default: '{DEFAULT_LOOKUPS_DIR}')")
-    arg_parser.add_argument("--hash-dir", default=DEFAULT_HASH_DIR,
-                             help=f"Folder for the content-hash checkpoint (default: {DEFAULT_HASH_DIR})")
-    arg_parser.add_argument("--meili-url", default=DEFAULT_MEILI_URL,
-                             help=f"MeiliSearch server URL (default: {DEFAULT_MEILI_URL})")
-    arg_parser.add_argument("--meili-index", default=DEFAULT_MEILI_INDEX,
-                             help=f"Index to upload into (default: {DEFAULT_MEILI_INDEX})")
-    arg_parser.add_argument("--meili-api-key", default=DEFAULT_MEILI_API_KEY,
-                             help="MeiliSearch API key (default: read from .env's MEILI_API_KEY)")
-    arg_parser.add_argument("--meili-notes-index", default=None,
-                             help=f"Index for duplicate/unsupported/error notes "
-                                  f"(default: <meili-index>{NOTES_INDEX_SUFFIX})")
-    args = arg_parser.parse_args()
-    main(args.folder_name, args.workers, args.lookups_dir, args.hash_dir,
-         args.meili_url, args.meili_index, args.meili_api_key, args.meili_notes_index)
+    main()
