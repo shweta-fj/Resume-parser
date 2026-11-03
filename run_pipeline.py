@@ -3,8 +3,8 @@ run_pipeline.py  --  runs the three steps one after the other.  Each step is the
 
   1. classification   main\\classify_resumes.py      Input\\           ->  classification\\Valid, classification\\Invalid
                       (it imports main\\resume_engine.py itself)
-  2. parsing          parser\\parse_resumes_simple.py classification\\  ->  Output\\Valid, Output\\Invalid   (JSON per file)
-  3. uploading        parser\\upload_to_meilisearch.py Output\\Valid     ->  MeiliSearch index new_resumes
+  2. parsing          main\\parse_resumes_simple.py classification\\  ->  Output\\Valid, Output\\Duplicates, Output\\Invalid
+  3. uploading        main\\upload_to_meilisearch.py Output\\Valid     ->  MeiliSearch index new_resumes
                       (deletes the old documents of the index first and asks you to type YES, unless --yes)
 
   python run_pipeline.py                              # all three steps
@@ -28,8 +28,8 @@ if os.path.basename(ROOT).lower() in ("main", "parser"):            # works from
     ROOT = os.path.dirname(ROOT)
 PY = sys.executable
 CLASSIFY = os.path.join(ROOT, "main", "classify_resumes.py")
-PARSE = os.path.join(ROOT, "parser", "parse_resumes_simple.py")
-UPLOAD = os.path.join(ROOT, "parser", "upload_to_meilisearch.py")
+PARSE = os.path.join(ROOT, "main", "parse_resumes_simple.py")
+UPLOAD = os.path.join(ROOT, "main", "upload_to_meilisearch.py")
 
 
 def run(title, command):
@@ -65,11 +65,11 @@ def main():
 
     if args.clean and steps["parse"]:
         removed = 0
-        for folder in ("Valid", "Invalid"):
+        for folder in ("Valid", "Duplicates", "Invalid"):
             for path in glob.glob(os.path.join(ROOT, "Output", folder, "*.json")):
                 os.remove(path)
                 removed += 1
-        print(f"--clean: {removed} JSON files removed from Output")
+        print(f"--clean: {removed} JSON files removed from Output (Valid, Duplicates and Invalid)")
 
     if steps["classify"]:
         cmd = [PY, CLASSIFY]

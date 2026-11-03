@@ -443,10 +443,7 @@ def main():
                         except Exception as problem:
                             verdict, reason, note = "invalid", f"could not read the CSV: {problem}", ""
                         mark(rec, "Valid" if verdict == "valid" else "Invalid", reason, note)
-                    elif ext in CODE_EXTENSIONS:
-                        rec["kind"] = "code/web file"
-                        mark(rec, "Invalid", f"web or code file ({ext}), not a resume")
-                    else:
+                    else:                                       # no file type is refused by its extension: a text file is read like any other, whatever it is called
                         rec["kind"] = "text"
                         to_read.append((real, inside, E.TEXT_MIME, rid))
                 else:

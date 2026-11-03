@@ -2606,7 +2606,8 @@ def find_libreoffice():
         if found:
             return found
     for path in (r"C:\Program Files\LibreOffice\program\soffice.exe",
-                 r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"):
+                 r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+                 r"D:\LibreOffice\program\soffice.exe"):
         if os.path.exists(path):
             return path
     return None
