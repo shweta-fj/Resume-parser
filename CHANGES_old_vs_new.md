@@ -1,8 +1,4 @@
 # parse_resumes_simple.py — what changed from the old script to the new one
-
-Old script: `fj-resume-parser\main\parse_resumes_simple.py` (2,366 lines, 83 functions).
-New script: `main\parse_resumes_simple.py` (5,385 lines, 212 functions, 2 classes + `ValidWriter`).
-
 The parser is still rule-based. It uses no LLM. The libraries are the same: pymupdf, python-docx, LibreOffice, Tesseract, phonenumbers, rapidfuzz, dateparser, spaCy and email-validator.
 
 The rules the new script follows:
@@ -107,14 +103,6 @@ The rules the new script follows:
   - experience 90.8%, current employer about 54% (after the employer fix)
   - Invalid holds only real non-resumes: duplicates, spreadsheets that are not candidate lists, job descriptions, certificates, empty or password-protected files.
 
-## 4. Known gaps
-
-- Skills: the script returns a shorter, safer list than an LLM.
-- Four project names are still sentence-like, and one internship has no title or company.
-- A few certificates written in prose are not picked up.
-- About 8 current-employer values are still titles or labels.
-- A job title next to a company with no separator can be dropped together with the company.
-
-## 5. Files
+## 4. Files
 
 Run order (`run_pipeline.py`): `classify_resumes.py` → `parse_resumes_simple.py` → `upload_to_meilisearch.py`.
